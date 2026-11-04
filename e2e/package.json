@@ -1,0 +1,7 @@
+{
+  "name": "qq597-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": { "mobile": "node mobile-check.mjs" },
+  "devDependencies": { "playwright-core": "1.56.1" }
+}

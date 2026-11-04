@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+frontend/dist/
+backend/data/
+*.db
+*.key
+.DS_Store
+e2e/node_modules/
+e2e/screenshots/

@@ -1,0 +1,70 @@
+// zh is the source; en/es cover navigation and all field-facing flows (当班任务、检查表、上传、扫码、收货).
+type Dict = Record<string, string>
+const zh: Dict = {
+  'nav.home': '我的当班', 'nav.pages': '页面', 'nav.notebook': '公司 Notebook', 'nav.ingest': '资料中心',
+  'nav.settings': '页面与系统设置', 'nav.audit': '审计日志', 'nav.users': '用户与角色', 'nav.schema': '记录类型与字段',
+  'nav.pagesAdmin': '页面管理', 'nav.me': '我的设置', 'nav.logout': '退出', 'nav.switch': '切换人员',
+  'common.save': '保存', 'common.cancel': '取消', 'common.submit': '提交', 'common.add': '新增', 'common.edit': '编辑',
+  'common.delete': '删除', 'common.close': '关闭', 'common.search': '搜索', 'common.loading': '加载中…',
+  'common.empty': '暂无数据', 'common.unknown': '未知', 'common.owner': '负责人', 'common.due': '截止',
+  'common.status': '状态', 'common.updated': '更新时间', 'common.confirm': '确认', 'common.retry': '重试',
+  'task.todo': '待开始', 'task.doing': '进行中', 'task.blocked': '受阻', 'task.review': '待核验', 'task.done': '已完成', 'task.cancelled': '取消',
+  'task.mine': '我的任务', 'task.reportDone': '报告完成（待核验）', 'task.start': '开始', 'task.block': '标记受阻',
+  'task.nextStep': '下一步', 'task.criteria': '完成标准', 'task.needEvidence': '需要证据', 'task.missingEvidence': '缺证据',
+  'ev.title': '证据', 'ev.camera': '拍照', 'ev.upload': '上传文件', 'ev.pick': '选择已有证据', 'ev.purpose': '用途',
+  'ev.unverified': '未核验', 'ev.approved': '已通过', 'ev.rejected': '已驳回', 'ev.superseded': '已取代',
+  'ev.uploading': '上传中', 'ev.failed': '失败', 'ev.done': '完成', 'ev.restricted': '受限证据（无权查看）',
+  'ck.submit': '提交检查', 'ck.pass': '合格', 'ck.fail': '不合格', 'ck.na': '不适用', 'ck.value': '实测值',
+  'ck.naReason': '不适用理由', 'ck.photoRequired': '需拍照', 'ck.history': '最近提交', 'ck.submitted': '已提交',
+  'scan.title': '扫码', 'scan.manual': '手动输入编码', 'scan.noCamera': '此设备不支持摄像头扫码，请手动输入',
+  'inv.receive': '收货', 'inv.qty': '数量', 'inv.lot': '批次', 'inv.counted': '已点数（实盘）', 'inv.estimated': '未核数（估计）',
+  'login.title': '登录', 'login.username': '用户名', 'login.password': '密码', 'login.pin': 'PIN', 'login.kiosk': '共享设备快速切换',
+  'offline': '网络断开：未同步的内容不会显示为已完成',
+}
+const en: Dict = {
+  'nav.home': 'My shift', 'nav.pages': 'Pages', 'nav.notebook': 'Notebook', 'nav.ingest': 'Inbox', 'nav.settings': 'Settings',
+  'nav.audit': 'Audit log', 'nav.users': 'Users', 'nav.schema': 'Record types', 'nav.pagesAdmin': 'Pages admin', 'nav.me': 'My settings',
+  'nav.logout': 'Log out', 'nav.switch': 'Switch user',
+  'common.save': 'Save', 'common.cancel': 'Cancel', 'common.submit': 'Submit', 'common.add': 'Add', 'common.edit': 'Edit',
+  'common.delete': 'Delete', 'common.close': 'Close', 'common.search': 'Search', 'common.loading': 'Loading…', 'common.empty': 'Nothing here',
+  'common.unknown': 'Unknown', 'common.owner': 'Owner', 'common.due': 'Due', 'common.status': 'Status', 'common.updated': 'Updated',
+  'common.confirm': 'Confirm', 'common.retry': 'Retry',
+  'task.todo': 'To do', 'task.doing': 'In progress', 'task.blocked': 'Blocked', 'task.review': 'To verify', 'task.done': 'Done', 'task.cancelled': 'Cancelled',
+  'task.mine': 'My tasks', 'task.reportDone': 'Report done (to verify)', 'task.start': 'Start', 'task.block': 'Mark blocked',
+  'task.nextStep': 'Next step', 'task.criteria': 'Done when', 'task.needEvidence': 'Evidence required', 'task.missingEvidence': 'Missing evidence',
+  'ev.title': 'Evidence', 'ev.camera': 'Take photo', 'ev.upload': 'Upload file', 'ev.pick': 'Pick existing', 'ev.purpose': 'Purpose',
+  'ev.unverified': 'Unverified', 'ev.approved': 'Approved', 'ev.rejected': 'Rejected', 'ev.superseded': 'Superseded',
+  'ev.uploading': 'Uploading', 'ev.failed': 'Failed', 'ev.done': 'Done', 'ev.restricted': 'Restricted evidence',
+  'ck.submit': 'Submit check', 'ck.pass': 'Pass', 'ck.fail': 'Fail', 'ck.na': 'N/A', 'ck.value': 'Reading', 'ck.naReason': 'Reason for N/A',
+  'ck.photoRequired': 'Photo required', 'ck.history': 'Recent submissions', 'ck.submitted': 'Submitted',
+  'scan.title': 'Scan', 'scan.manual': 'Enter code manually', 'scan.noCamera': 'Camera scanning not supported here; enter the code',
+  'inv.receive': 'Receive', 'inv.qty': 'Qty', 'inv.lot': 'Lot', 'inv.counted': 'Counted', 'inv.estimated': 'Estimated (not counted)',
+  'login.title': 'Sign in', 'login.username': 'Username', 'login.password': 'Password', 'login.pin': 'PIN', 'login.kiosk': 'Shared device quick switch',
+  'offline': 'Offline: unsynced work is not shown as completed',
+}
+const es: Dict = {
+  'nav.home': 'Mi turno', 'nav.pages': 'Páginas', 'nav.notebook': 'Cuaderno', 'nav.ingest': 'Documentos', 'nav.settings': 'Ajustes',
+  'nav.audit': 'Auditoría', 'nav.users': 'Usuarios', 'nav.schema': 'Tipos de registro', 'nav.pagesAdmin': 'Páginas', 'nav.me': 'Mis ajustes',
+  'nav.logout': 'Salir', 'nav.switch': 'Cambiar usuario',
+  'common.save': 'Guardar', 'common.cancel': 'Cancelar', 'common.submit': 'Enviar', 'common.add': 'Agregar', 'common.edit': 'Editar',
+  'common.delete': 'Eliminar', 'common.close': 'Cerrar', 'common.search': 'Buscar', 'common.loading': 'Cargando…', 'common.empty': 'Sin datos',
+  'common.unknown': 'Desconocido', 'common.owner': 'Responsable', 'common.due': 'Vence', 'common.status': 'Estado', 'common.updated': 'Actualizado',
+  'common.confirm': 'Confirmar', 'common.retry': 'Reintentar',
+  'task.todo': 'Pendiente', 'task.doing': 'En curso', 'task.blocked': 'Bloqueada', 'task.review': 'Por verificar', 'task.done': 'Hecha', 'task.cancelled': 'Cancelada',
+  'task.mine': 'Mis tareas', 'task.reportDone': 'Reportar hecha (por verificar)', 'task.start': 'Empezar', 'task.block': 'Marcar bloqueada',
+  'task.nextStep': 'Siguiente paso', 'task.criteria': 'Criterio de cierre', 'task.needEvidence': 'Requiere evidencia', 'task.missingEvidence': 'Falta evidencia',
+  'ev.title': 'Evidencia', 'ev.camera': 'Tomar foto', 'ev.upload': 'Subir archivo', 'ev.pick': 'Elegir existente', 'ev.purpose': 'Uso',
+  'ev.unverified': 'Sin verificar', 'ev.approved': 'Aprobada', 'ev.rejected': 'Rechazada', 'ev.superseded': 'Reemplazada',
+  'ev.uploading': 'Subiendo', 'ev.failed': 'Falló', 'ev.done': 'Listo', 'ev.restricted': 'Evidencia restringida',
+  'ck.submit': 'Enviar revisión', 'ck.pass': 'Cumple', 'ck.fail': 'No cumple', 'ck.na': 'N/A', 'ck.value': 'Lectura', 'ck.naReason': 'Motivo de N/A',
+  'ck.photoRequired': 'Foto requerida', 'ck.history': 'Envíos recientes', 'ck.submitted': 'Enviado',
+  'scan.title': 'Escanear', 'scan.manual': 'Ingresar código', 'scan.noCamera': 'Escaneo no disponible; ingrese el código',
+  'inv.receive': 'Recibir', 'inv.qty': 'Cantidad', 'inv.lot': 'Lote', 'inv.counted': 'Contado', 'inv.estimated': 'Estimado (sin contar)',
+  'login.title': 'Iniciar sesión', 'login.username': 'Usuario', 'login.password': 'Contraseña', 'login.pin': 'PIN', 'login.kiosk': 'Cambio rápido (equipo compartido)',
+  'offline': 'Sin conexión: lo no sincronizado no se muestra como completado',
+}
+const dicts: Record<string, Dict> = { zh, en, es }
+let lang = 'zh'
+export const setLang = (l: string) => { lang = dicts[l] ? l : 'zh' }
+export const getLang = () => lang
+export const t = (k: string) => dicts[lang]?.[k] ?? zh[k] ?? k

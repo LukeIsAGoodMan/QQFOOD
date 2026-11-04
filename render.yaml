@@ -1,0 +1,22 @@
+# Render Blueprint：在 Render 选 New → Blueprint，指向这个仓库即可按此创建
+services:
+  - type: web
+    name: qqfood-597
+    runtime: docker
+    region: oregon
+    plan: starter            # 需要付费实例才能挂持久磁盘；免费实例会休眠且重启丢数据
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: qq-data
+      mountPath: /var/data   # 数据库、上传文件、密钥都在这里，重新部署不会丢
+      sizeGB: 5
+    envVars:
+      - key: QQ_DATA_DIR
+        value: /var/data
+      - key: QQ_DEMO_PASSWORD   # 演示账号密码（随机生成，在 Environment 页面查看）
+        generateValue: true
+      - key: QQ_DEMO_PIN        # 现场 PIN，请改成你自己的 6 位数字
+        value: "000000"
+      - key: QQ_PUBLIC_URL      # 部署后填 https://<你的服务名>.onrender.com 或自己的域名
+        sync: false
