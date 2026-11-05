@@ -3,7 +3,7 @@ import { get, getToken, post, setToken, setUnauthorizedHandler } from './api'
 import { setLang } from './i18n'
 import { setUserTz } from './fmt'
 
-export type Me = { id: string; username: string; name: string; role: string; role_label: string; lang: string; tz: string; perms: string[]; has_pin: boolean; agent_enabled: boolean }
+export type Me = { id: string; username: string; name: string; role: string; role_label: string; lang: string; tz: string; perms: string[]; has_pin: boolean; agent_enabled: boolean; org_mode: string }
 type Ctx = { me: Me | null; loading: boolean; login: (u: string, p: string, pin?: boolean) => Promise<void>; logout: () => void; refresh: () => Promise<void>; can: (p: string) => boolean }
 
 const AuthCtx = createContext<Ctx>(null as any)

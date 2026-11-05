@@ -320,9 +320,59 @@ def test_NB_shared_password_audit_and_offboarding(client, login):
     client.patch(f"/api/users/{b['id']}", json={"username": "buyer", "display_name": b["name"], "role": "purchaser", "active": False}, headers=admin)
     assert any(t["title"].startswith("轮换共享密码：测试门户") for t in client.get("/api/tasks", headers=ops).json())
     assert client.get("/api/me", headers=buyer).status_code == 401  # revocation immediate
+    # restore for later test modules
+    client.patch(f"/api/users/{b['id']}", json={"username": "buyer", "display_name": b["name"], "role": "purchaser", "active": True}, headers=admin)
 
 
 def test_SEC_login_rate_limit(client):
     for _ in range(8):
         assert client.post("/api/auth/login", json={"username": "nobody_x", "password": "wrong"}).status_code == 401
     assert client.post("/api/auth/login", json={"username": "nobody_x", "password": "wrong"}).status_code == 429
+
+
+def test_INV_inbound_from_untracked_company_source(client, login):
+    """多伦多/温哥华发来的货：不走采购，走调入；来源地不在本系统管账，不检查也不扣它的库存。"""
+    wh = login("wh")
+    m = master(client, wh)
+    W = {w["code"]: w for w in m["warehouses"]}
+    S = {s["code"]: s["id"] for s in m["skus"]}
+    assert W["TOR"]["tracked"] is False and W["VAN"]["tracked"] is False
+    before = stock_row(client, wh, "RM-BEEF", "WH597") or {"on_hand": 0, "in_transit": 0}
+    tr = client.post("/api/inv/transfers", json={"from_wh": W["TOR"]["id"], "to_wh": W["WH597"]["id"], "shipped_now": True,
+                                                 "expected_date": "2026-11-20", "note": "多伦多 10 板",
+                                                 "lines": [{"sku_id": S["RM-BEEF"], "lot_code": "TOR-2411", "qty": 524}]}, headers=wh)
+    assert tr.status_code == 200, tr.text
+    t = tr.json()
+    assert t["inbound"] is True and t["status"] == "shipped" and t["lines"][0]["lot_code"] == "TOR-2411"
+    mid = stock_row(client, wh, "RM-BEEF", "WH597")
+    assert mid["in_transit"] == before["in_transit"] + 524 and mid["on_hand"] == before["on_hand"]
+    assert stock_row(client, wh, "RM-BEEF", "TOR") is None  # nothing booked at the untracked source
+    r = client.post(f"/api/inv/transfers/{t['id']}/receive", json={"idempotency_key": key(), "lines": [
+        {"line_id": t["lines"][0]["id"], "qty_received": 520, "qty_damaged": 2}]}, headers=wh).json()
+    assert r["transfer"]["status"] == "partial"
+    after = stock_row(client, wh, "RM-BEEF", "WH597")
+    assert after["on_hand"] == before["on_hand"] + 520 and after["in_transit"] == before["in_transit"] + 4
+    assert client.get(f"/api/tasks?target_id={t['id']}", headers=wh).json()  # 差异任务
+
+
+def test_SEC_simple_team_mode(client, login):
+    """精简模式（默认）：老板/主管全部权限，允许本人核验（标注本人）；现场员工仍受限。"""
+    admin, ops, staff = login("admin"), login("ops"), login("staff2")
+    assert client.put("/api/settings/org", json={"mode": "simple"}, headers=ops).status_code == 403
+    assert client.put("/api/settings/org", json={"mode": "simple"}, headers=admin).json()["mode"] == "simple"
+    try:
+        me = client.get("/api/me", headers=ops).json()
+        assert me["org_mode"] == "simple" and "全部权限" in me["role_label"]
+        assert {"po.approve", "finance.reconcile", "quality.release", "inventory.post"} <= set(me["perms"])
+        up = client.post("/api/evidence/upload", files={"file": ("self.png", png(501), "image/png")},
+                         data={"target_type": "task", "target_id": "t_self", "purpose": "附件"}, headers=ops).json()
+        v = client.post(f"/api/evidence/links/{up['link_id']}/verify", json={"status": "approved"}, headers=ops)
+        assert v.status_code == 200
+        link = client.get("/api/evidence?target_type=task&target_id=t_self", headers=ops).json()[0]
+        assert link["verify_note"].startswith("（本人核验）")
+        staff_perms = set(client.get("/api/me", headers=staff).json()["perms"])
+        assert "po.approve" not in staff_perms and "notebook.manage" not in staff_perms
+        roles = client.get("/api/roles", headers=ops).json()
+        assert [r["key"] for r in roles[:3]] == ["boss", "ops_manager", "staff"]
+    finally:
+        client.put("/api/settings/org", json={"mode": "standard"}, headers=admin)

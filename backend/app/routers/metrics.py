@@ -26,6 +26,9 @@ DEFS = {
     "unverified_evidence": ("待核验证据", "有效关联中核验状态为「未核验」的数量", "/evidence-review"),
     "pending_ingest": ("资料待处理", "资料中心中待整理/待确认/冲突的条目数", "/ingest"),
     "in_transit": ("在途调拨", "已发运未完全签收的调拨单数", "/inventory"),
+    "po_pending_approval": ("待审批采购", "金额超过审批额度、等待老板签批的采购单数（含补录采购的事后审批）", "/purchasing"),
+    "po_overdue": ("到货逾期", "已下单或部分到货、预计到货日早于今天（场地时区）的采购单数", "/purchasing"),
+    "receipts_pending": ("收货待入账", "现场已提交、尚未由仓管签名入账的收货单数", "/purchasing"),
     "missing_checklists": ("今日应填未提交", "已发布页面中设为每日必填、今天（场地时区）尚无提交的检查表数", "/tasks"),
 }
 
@@ -75,6 +78,18 @@ def compute(db: Session, u: User, key: str) -> dict:
         value = db.query(IngestItem).filter(IngestItem.status.in_(["inbox", "pending_confirm", "conflict"])).count()
     elif key == "in_transit":
         value = db.query(Transfer).filter(Transfer.status.in_(["shipped", "partial"])).count()
+    elif key in ("po_pending_approval", "po_overdue", "receipts_pending"):
+        from ..models import PurchaseOrder, Receipt
+        if key == "po_pending_approval":
+            from .purchasing import _awaiting_approval
+            value = sum(1 for p in db.query(PurchaseOrder).filter(PurchaseOrder.status.in_(["pending_approval", "received", "closed"]))
+                        if _awaiting_approval(p))
+        elif key == "po_overdue":
+            today = datetime.now(ZoneInfo((db.query(Site).first() or Site(tz="America/Los_Angeles")).tz)).date().isoformat()
+            value = db.query(PurchaseOrder).filter(PurchaseOrder.status.in_(["ordered", "partial"]), PurchaseOrder.expected_date.isnot(None),
+                                                   PurchaseOrder.expected_date < today).count()
+        else:
+            value = db.query(Receipt).filter_by(status="submitted").count()
     elif key == "missing_checklists":
         start = _site_today_start(db)
         required, missing = 0, []
@@ -118,7 +133,8 @@ def my_shift(u: User = Depends(current_user), db: Session = Depends(get_db)):
     start = _site_today_start(db)
     checks = []
     for p in db.query(Page).filter_by(status="active").order_by(Page.sort_order):
-        if p.visible_roles and u.role not in p.visible_roles:
+        from ..core import is_superuser
+        if p.visible_roles and u.role not in p.visible_roles and not is_superuser(u):
             continue
         v = db.get(PageVersion, p.published_version_id) if p.published_version_id else None
         for m in (v.layout["modules"] if v else []):

@@ -186,7 +186,8 @@ def authorize_submit(request: Request, username: str = Form(""), password: str =
         audit(db, None, "agent.authorize_failed", "user", username)
         db.commit()
         return _render(c, params, "用户名或密码错误", username)
-    if u.role not in AGENT_ROLES:
+    from ..core import is_superuser
+    if u.role not in AGENT_ROLES and not is_superuser(u):
         return _render(c, params, "该角色不能连接 AI 助手", username)
     if not u.agent_enabled:
         return _render(c, params, "你还没有开启 AI 助手访问。请先在系统「我的设置 → AI 助手」中开启，再回来授权。", username)

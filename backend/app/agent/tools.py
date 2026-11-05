@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..core import FILE_SIGN_KEY, ROLES
 from ..models import BusinessRecord, FieldDefinition, IngestItem, Lot, Sku, Task, User, Warehouse
 from ..routers import evidence as ev_r, ingest as ing_r, inventory as inv_r, metrics as met_r, notebook as nb_r
-from ..routers import records as rec_r, tasks as task_r
+from ..routers import purchasing as pur_r, records as rec_r, tasks as task_r
 from ..routers.auth import search as global_search
 
 TOOLS: dict[str, dict] = {}
@@ -282,6 +282,33 @@ def find_contacts(ctx, db, query):
                                             "last_verified_at")} for c in nb_r.contacts(query, ctx.user, db)[:20]]}
 
 
+@tool("list_purchase_orders", "采购单列表", "列出采购单：状态（待审批/已下单/部分到货/已到齐…）、供应商、金额、预计到货、是否逾期、收货进度、付款核对状态。",
+      {"status": {"type": "string", "description": "逗号分隔：draft,pending_approval,approved,ordered,partial,received,closed"},
+       "open_only": {"type": "boolean", "description": "只看未完结的"}, "overdue_only": {"type": "boolean"}})
+def list_purchase_orders(ctx, db, status=None, open_only=False, overdue_only=False):
+    rows = pur_r.list_pos(status, open_only, ctx.user, db)
+    if overdue_only:
+        rows = [r for r in rows if r["overdue"]]
+    return {"approval_limit_usd": pur_r.approval_limit(db), "count": len(rows), "purchase_orders": [
+        {k: r[k] for k in ("id", "code", "supplier", "category", "status_label", "total", "expected_date", "overdue", "received_pct",
+                           "pending_receipts", "payment_label", "owner")} | {"url": ctx.link(f"/purchasing?po={r['id']}")} for r in rows[:30]]}
+
+
+@tool("get_purchase_order", "采购单详情", "按采购单号（如 PO-261104-001）或 id 查看：行明细（订购/已收/拒收/未到）、审批签名、收货单、发票与应付参考额核对、付款状态。批准、入账、核对需在系统中完成。",
+      {"po": {"type": "string", "description": "采购单号或 id"}}, ["po"])
+def get_purchase_order(ctx, db, po):
+    from ..models import PurchaseOrder
+    obj = db.get(PurchaseOrder, po) or db.query(PurchaseOrder).filter_by(code=po.strip().upper()).first()
+    if not obj:
+        raise ToolError(f"找不到采购单 {po}")
+    d = pur_r.po_out(db, obj, ctx.user)
+    d.pop("can", None)
+    d["evidence_items"] = _evidence_meta(ctx, db, "po", obj.id)
+    d["url"] = ctx.link(f"/purchasing?po={obj.id}")
+    d["note_for_ai"] = "批准、收货入账、付款核对都需要有权限的人在系统中签名完成；你可以用 propose_change 提议修改预计到货。"
+    return d
+
+
 @tool("list_people", "人员", "列出系统用户的姓名和角色（用于指派任务）。")
 def list_people(ctx, db):
     return {"people": [{"name": u.display_name, "role": ROLES.get(u.role, u.role)} for u in db.query(User).filter_by(active=True)
@@ -335,7 +362,7 @@ TASK_FIELD_ALIASES = {"due_at": "due_at", "截止时间": "due_at", "截止": "d
 
 @tool("propose_change", "提出待确认变更",
       "根据用户提供的信息（如聊天截图、单据照片的内容）对某条记录或任务提出字段修改。不会直接生效：进入资料中心，由用户在系统中逐项确认。field 可用字段中文名（list_record_types/get_record 可查）。",
-      {"target_type": {"type": "string", "enum": ["record", "task"]}, "target_id": {"type": "string"},
+      {"target_type": {"type": "string", "enum": ["record", "task", "po"]}, "target_id": {"type": "string", "description": "记录/任务 id，或采购单 id"},
        "changes": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "object", "properties": {
            "field": {"type": "string"}, "new_value": {"type": ["string", "number", "boolean"]}, "reason": {"type": "string"}},
            "required": ["field", "new_value"], "additionalProperties": False}},
@@ -350,6 +377,14 @@ def propose_change(ctx, db, target_type, target_id, changes, source_summary):
         fmap = {"title": "title", "标题": "title", "status": "status", "状态": "status"}
         for f in db.query(FieldDefinition).filter_by(record_type_id=obj.record_type_id, active=True):
             fmap[f.label] = fmap[f.id] = fmap[f"data.{f.id}"] = f"data.{f.id}"
+    elif target_type == "po":
+        from ..models import PurchaseOrder
+        obj = db.get(PurchaseOrder, target_id) or db.query(PurchaseOrder).filter_by(code=target_id.strip().upper()).first()
+        if not obj:
+            raise ToolError("采购单不存在")
+        target_id = obj.id
+        fmap = {"expected_date": "expected_date", "预计到货": "expected_date", "交期": "expected_date", "到货日期": "expected_date",
+                "note": "note", "备注": "note"}
     else:
         obj = db.get(Task, target_id)
         if not obj:
@@ -363,6 +398,12 @@ def propose_change(ctx, db, target_type, target_id, changes, source_summary):
         val = ch.get("new_value")
         if key == "due_at" and isinstance(val, str):
             val = _to_dt(val)
+        if key == "expected_date":
+            val = str(val)[:10]
+            try:
+                datetime.fromisoformat(val)
+            except ValueError:
+                raise ToolError("预计到货请用 YYYY-MM-DD")
         rows.append(ing_r.ChangeIn(field=key, new=val, reason=str(ch.get("reason") or ""), evidence_loc=f"{ctx.client} 转述"))
     stamp = datetime.now(SITE_TZ).strftime("%Y%m%d-%H%M%S")
     note = (f"AI 助手转述（非原件）\n来源：{ctx.client}\n发起人：{u.display_name}\n时间：{datetime.now(SITE_TZ).isoformat(timespec='seconds')}\n"
@@ -376,7 +417,8 @@ def propose_change(ctx, db, target_type, target_id, changes, source_summary):
     cs = ing_r.propose(it.id, ing_r.ProposeIn(target_type=target_type, target_id=target_id, changes=rows), u, db)
     return {"status": "pending_confirmation", "message": "已提交为待确认变更，尚未生效。请用户打开链接逐项确认。",
             "changes": [{"field": c["label"], "old": c["old"], "new": c["new"]} for c in cs["changes"]],
-            "confirm_url": _link(ctx, "ingest", it.id), "target_url": _link(ctx, target_type, target_id)}
+            "confirm_url": _link(ctx, "ingest", it.id),
+            "target_url": ctx.link(f"/purchasing?po={target_id}") if target_type == "po" else _link(ctx, target_type, target_id)}
 
 
 # ---------- original-file upload link ----------
@@ -402,10 +444,11 @@ def verify_upload(token: str) -> dict:
 
 
 @tool("request_upload_link", "生成原件上传链接", "生成一个 30 分钟有效的手机上传链接，让用户把照片/PDF 原件直接上传到指定任务、记录或调拨单（作为证据，待核验）。",
-      {"target_type": {"type": "string", "enum": ["task", "record", "transfer"]}, "target_id": {"type": "string"},
-       "purpose": {"type": "string", "description": "用途，如 签收单、安装后照片、发票、整改证明"}}, ["target_type", "target_id"], tier="write")
+      {"target_type": {"type": "string", "enum": ["task", "record", "transfer", "po"]}, "target_id": {"type": "string"},
+       "purpose": {"type": "string", "description": "用途，如 签收单、安装后照片、发票、付款证明、整改证明"}}, ["target_type", "target_id"], tier="write")
 def request_upload_link(ctx, db, target_type, target_id, purpose="附件"):
-    exists = {"task": Task, "record": BusinessRecord}.get(target_type)
+    from ..models import PurchaseOrder
+    exists = {"task": Task, "record": BusinessRecord, "po": PurchaseOrder}.get(target_type)
     if exists and not db.get(exists, target_id):
         raise ToolError("目标不存在")
     if target_type == "transfer":

@@ -145,7 +145,8 @@ export function TaskDetail() {
             <div><span className="label">{t('common.due')}</span>{dt(tk.due_at, { site: true })}</div>
             <div><span className="label">{t('task.nextStep')}</span>{tk.next_step || '—'}</div>
             <div><span className="label">{t('task.criteria')}</span>{tk.done_criteria || '—'}</div>
-            {tk.target_type && tk.target_type === 'record' && <div><span className="label">关联</span><Link className="text-brand-700 underline" to={`/r/${tk.target_id}`}>查看记录</Link></div>}
+            {tk.target_type === 'record' && <div><span className="label">关联</span><Link className="text-brand-700 underline" to={`/r/${tk.target_id}`}>查看记录</Link></div>}
+            {tk.target_type === 'po' && <div><span className="label">关联</span><Link className="text-brand-700 underline" to={`/purchasing?po=${tk.target_id}`}>查看采购单</Link></div>}
             <div><span className="label">证据</span>{tk.evidence.count} 份，已核验 {tk.evidence.approved}</div>
           </div>
         )}
@@ -199,7 +200,7 @@ export function EvidenceDetail() {
   const [pv, setPv] = useState<any>(null)
   if (error) return <ErrorBox error={error} />
   if (!data) return <Spinner />
-  const linkTo = (l: any) => ({ record: `/r/${l.target_id}`, task: `/t/${l.target_id}` } as any)[l.target_type]
+  const linkTo = (l: any) => ({ record: `/r/${l.target_id}`, task: `/t/${l.target_id}`, po: `/purchasing?po=${l.target_id}` } as any)[l.target_type]
   return (
     <div className="mx-auto max-w-4xl space-y-4">
       <button onClick={() => history.back()} className="btn-ghost"><ArrowLeft size={16} />返回</button>

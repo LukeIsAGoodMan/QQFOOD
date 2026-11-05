@@ -1,4 +1,4 @@
-import { useParams, Link, Navigate } from 'react-router-dom'
+import { useParams, Link, Navigate, useLocation } from 'react-router-dom'
 import { Pencil } from 'lucide-react'
 import { get } from '../lib/api'
 import { ErrorBox, Spinner, useLoad } from '../components/ui'
@@ -36,8 +36,9 @@ export function PageView() {
 
 /** Resolve well-known drill links (/quality, /inventory) to the page that hosts them. */
 export function PageByName({ match }: { match: string }) {
+  const loc = useLocation()
   const { data } = useLoad(() => get('/api/pages'), [])
   if (!data) return <Spinner />
   const p = data.find((x: any) => x.name.includes(match))
-  return p ? <Navigate to={`/p/${p.id}`} replace /> : <div className="text-sm text-slate-500">未找到「{match}」页面</div>
+  return p ? <Navigate to={`/p/${p.id}${loc.search}`} replace /> : <div className="text-sm text-slate-500">未找到「{match}」页面</div>
 }

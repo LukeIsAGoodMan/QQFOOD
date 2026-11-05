@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from ..core import ROLES, PERMS, audit, can, check_secret, current_user, get_or_404, hash_secret, login_failed, login_guard, make_token, require
+from ..core import ORG, ROLES, PERMS, audit, can, check_secret, current_user, get_or_404, hash_secret, login_failed, login_guard, make_token, require, role_label
 from ..db import get_db
 from ..models import AccountEntry, AuditEvent, BusinessRecord, Contact, Evidence, Notification, Site, Task, User
 
@@ -13,8 +13,8 @@ router = APIRouter(prefix="/api", tags=["auth"])
 def me_payload(u: User):
     return {
         "id": u.id, "username": u.username, "name": u.display_name, "role": u.role,
-        "role_label": ROLES.get(u.role, u.role), "lang": u.lang, "tz": u.tz,
-        "perms": sorted(p for p, roles in PERMS.items() if u.role in roles),
+        "role_label": role_label(u.role), "lang": u.lang, "tz": u.tz, "org_mode": ORG["mode"],
+        "perms": sorted(p for p in PERMS if can(u, p)),
         "has_pin": bool(u.pin_hash), "agent_enabled": u.agent_enabled,
     }
 
@@ -100,7 +100,7 @@ def update_me(body: MePatch, u: User = Depends(current_user), db: Session = Depe
 def list_users(u: User = Depends(current_user), db: Session = Depends(get_db)):
     us = db.query(User).order_by(User.display_name).all()
     full = can(u, "users.manage")
-    return [{"id": x.id, "name": x.display_name, "role": x.role, "role_label": ROLES.get(x.role, x.role),
+    return [{"id": x.id, "name": x.display_name, "role": x.role, "role_label": role_label(x.role),
              **({"username": x.username, "active": x.active, "lang": x.lang, "tz": x.tz} if full else {})}
             for x in us if x.active or full]
 
@@ -184,7 +184,36 @@ def sites(u: User = Depends(current_user), db: Session = Depends(get_db)):
 
 @router.get("/roles")
 def roles(u: User = Depends(current_user)):
-    return [{"key": k, "label": v} for k, v in ROLES.items()]
+    keys = list(ROLES)
+    if ORG["mode"] == "simple":  # 精简模式：常用的三种放前面
+        keys = ["boss", "ops_manager", "staff"] + [k for k in keys if k not in ("boss", "ops_manager", "staff")]
+    return [{"key": k, "label": role_label(k), "common": ORG["mode"] != "simple" or k in ("boss", "ops_manager", "staff", "sys_admin")} for k in keys]
+
+
+@router.get("/settings/org")
+def get_org(u: User = Depends(current_user)):
+    return {"mode": ORG["mode"], "can_edit": u.role in ("boss", "sys_admin")}
+
+
+class OrgIn(BaseModel):
+    mode: str
+
+
+@router.put("/settings/org")
+def set_org(body: OrgIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    if u.role not in ("boss", "sys_admin"):
+        raise HTTPException(403, "只有老板或系统管理员可以切换团队模式")
+    if body.mode not in ("simple", "standard"):
+        raise HTTPException(400, "模式需为 simple 或 standard")
+    from ..models import AppSetting
+    s = db.get(AppSetting, "org") or AppSetting(key="org", value={})
+    old = ORG["mode"]
+    s.value, s.updated_by = {"mode": body.mode}, u.id
+    db.merge(s)
+    ORG["mode"] = body.mode
+    audit(db, u, "settings.org_mode", "setting", "org", mode=[old, body.mode])
+    db.commit()
+    return {"mode": body.mode}
 
 
 @router.get("/search")

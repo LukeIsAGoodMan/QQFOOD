@@ -68,7 +68,7 @@ function ShiftHome() {
 export function EvidenceReview() {
   const { data, reload } = useLoad(() => get('/api/evidence-pending'), [])
   const [pv, setPv] = useState<any>(null)
-  const linkTo = (l: any) => ({ record: `/r/${l.target_id}`, task: `/t/${l.target_id}` } as any)[l.target_type]
+  const linkTo = (l: any) => ({ record: `/r/${l.target_id}`, task: `/t/${l.target_id}`, po: `/purchasing?po=${l.target_id}` } as any)[l.target_type]
   return (
     <div className="mx-auto max-w-4xl">
       <h1 className="mb-3 text-xl font-bold">待核验证据（{data?.length ?? '…'}）</h1>

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
-import { ApiError, del, get, patch, post } from '../lib/api'
+import { ApiError, del, get, patch, post, put } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { dt } from '../lib/fmt'
 import { setLang } from '../lib/i18n'
@@ -139,6 +139,31 @@ export function Schema() {
 }
 
 // ---------- users ----------
+function TeamMode() {
+  const toast = useToast()
+  const { refresh } = useAuth()
+  const { data, reload } = useLoad(() => get('/api/settings/org'), [])
+  if (!data) return null
+  const set = async (mode: string) => {
+    if (mode === data.mode) return
+    try { await put('/api/settings/org', { mode }); reload(); refresh() } catch (e) { toast(errMsg(e), 'err') }
+  }
+  return (
+    <div className="card mb-4 p-4">
+      <div className="mb-2 font-semibold">团队模式</div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {[['simple', '精简（适合 2–5 人）', '老板、主管拥有全部权限；可以本人核验、本人批准、本人入账，系统标注「本人」并留记录。现场员工只做当班检查、收货提交、上报异常、拍照。'],
+          ['standard', '标准（人多以后）', '按岗位分权（采购、仓管、质量、财务…），核验、放行、入账等关键步骤要求分人复核。']].map(([k, title, desc]) => (
+          <button key={k} disabled={!data.can_edit} onClick={() => set(k)} className={`rounded-lg border-2 p-3 text-left ${data.mode === k ? 'border-brand-500 bg-brand-50' : 'border-slate-200'}`}>
+            <div className="text-sm font-semibold">{title}{data.mode === k && ' ✓'}</div><div className="mt-1 text-xs text-slate-600">{desc}</div>
+          </button>
+        ))}
+      </div>
+      {!data.can_edit && <p className="mt-2 text-xs text-slate-400">只有老板或系统管理员可以切换。</p>}
+    </div>
+  )
+}
+
 export function Users() {
   const toast = useToast()
   const { data, reload } = useLoad(() => get('/api/users'), [])
@@ -156,6 +181,7 @@ export function Users() {
   }
   return (
     <div className="mx-auto max-w-4xl">
+      <TeamMode />
       <div className="mb-3 flex items-center"><h1 className="text-xl font-bold">用户与角色</h1><button className="btn-primary ml-auto" onClick={() => setF({ username: '', display_name: '', role: 'staff', password: '', lang: 'zh', tz: 'America/Los_Angeles', active: true })}><Plus size={16} />新用户</button></div>
       <div className="card divide-y">
         {(data || []).map((u: any) => (
@@ -170,7 +196,10 @@ export function Users() {
         {f && <div className="grid gap-3 sm:grid-cols-2">
           <Field label="用户名"><input className="input" disabled={!!f.id} value={f.username} onChange={(e) => setF({ ...f, username: e.target.value })} /></Field>
           <Field label="显示名"><input className="input" value={f.display_name} onChange={(e) => setF({ ...f, display_name: e.target.value })} /></Field>
-          <Field label="角色"><select className="input" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })}>{(roles.data || []).map((r: any) => <option key={r.key} value={r.key}>{r.label}</option>)}</select></Field>
+          <Field label="角色"><select className="input" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })}>
+            {(roles.data || []).filter((r: any) => r.common).map((r: any) => <option key={r.key} value={r.key}>{r.label}</option>)}
+            {(roles.data || []).some((r: any) => !r.common) && <optgroup label="按岗位细分（标准模式用）">{(roles.data || []).filter((r: any) => !r.common).map((r: any) => <option key={r.key} value={r.key}>{r.label}</option>)}</optgroup>}
+          </select></Field>
           <Field label={f.id ? '重置密码（留空不改）' : '初始密码（≥8 位）'}><input className="input" type="password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /></Field>
           <Field label="语言"><select className="input" value={f.lang} onChange={(e) => setF({ ...f, lang: e.target.value })}><option value="zh">中文</option><option value="en">English</option><option value="es">Español</option></select></Field>
           <Field label="时区"><input className="input" value={f.tz} onChange={(e) => setF({ ...f, tz: e.target.value })} /></Field>
@@ -235,7 +264,7 @@ export function Me() {
         <Field label="修改密码（≥8 位）"><input className="input" type="password" autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} /></Field>
         <button className="btn-primary w-full" onClick={save}>保存</button>
       </div>
-      {me?.role !== 'sys_admin' && <AgentSettings />}
+      {(me?.role !== 'sys_admin' || me?.perms.includes('task.manage')) && <AgentSettings />}
     </div>
   )
 }

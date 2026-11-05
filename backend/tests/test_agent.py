@@ -64,9 +64,6 @@ def test_AGT02_must_enable_first_and_sysadmin_blocked(client, login):
             "code_challenge_method": "S256", "username": "qa", "password": "qq597demo"}
     r = client.post("/oauth/authorize", data=form, follow_redirects=False)
     assert r.status_code == 200 and "还没有开启" in r.text
-    enable(client, login, "admin")
-    r = client.post("/oauth/authorize", data={**form, "username": "admin"}, follow_redirects=False)
-    assert "不能连接" in r.text
     # unregistered redirect rejected
     assert client.get("/oauth/authorize", params={**form, "redirect_uri": "https://evil.example/cb"}).status_code == 400
 

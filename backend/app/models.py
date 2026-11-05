@@ -233,8 +233,11 @@ class Warehouse(Base):
     id: Mapped[str] = _id("wh")
     code: Mapped[str] = mapped_column(String(32), unique=True)
     name: Mapped[str] = mapped_column(String(200))
-    kind: Mapped[str] = mapped_column(String(16), default="main")  # main | external
+    kind: Mapped[str] = mapped_column(String(16), default="main")  # main 主场地 | external 外库(3PL) | company 公司其他地点（多伦多/温哥华）
     site_id: Mapped[str | None] = mapped_column(ForeignKey("sites.id"), nullable=True)
+    # 是否在本系统管账：False = 只作为来源地（如多伦多、温哥华），发货时不扣它的库存、也不检查账面
+    tracked: Mapped[bool] = mapped_column(Boolean, default=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Sku(Base):
@@ -521,3 +524,129 @@ class AgentToken(Base):
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = TS()
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------- Settings ----------
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON)
+    updated_by: Mapped[str | None] = mapped_column(String(32))
+    updated_at: Mapped[datetime] = TS()
+
+
+# ---------- Procurement (PRD §6.5 PUR-01..03) ----------
+class Requisition(Base):
+    """采购需求。数量与余量按版本保存（PUR-02），报价挂在具体版本上（PUR-01）。"""
+    __tablename__ = "requisitions"
+    id: Mapped[str] = _id("rq")
+    code: Mapped[str] = mapped_column(String(40), unique=True)
+    title: Mapped[str] = mapped_column(String(300))
+    category: Mapped[str] = mapped_column(String(20), default="原料包材")  # 设备 耗材 原料包材
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open ordered closed cancelled
+    current_version_id: Mapped[str | None] = mapped_column(String(32))
+    owner_id: Mapped[str | None] = mapped_column(String(32))
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = TS()
+
+
+class RequisitionVersion(Base):
+    __tablename__ = "requisition_versions"
+    id: Mapped[str] = _id("rqv")
+    requisition_id: Mapped[str] = mapped_column(ForeignKey("requisitions.id"), index=True)
+    version_no: Mapped[int] = mapped_column(Integer)
+    margin_pct: Mapped[float] = mapped_column(Float, default=0)
+    lines: Mapped[list] = mapped_column(JSON)  # [{key, sku_id, item_name, base_qty, unit}] ; 需求量 = base_qty × (1+余量)
+    note: Mapped[str] = mapped_column(String(1000), default="")
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = TS()
+
+
+class Quote(Base):
+    __tablename__ = "quotes"
+    id: Mapped[str] = _id("qt")
+    requisition_id: Mapped[str] = mapped_column(ForeignKey("requisitions.id"), index=True)
+    version_id: Mapped[str] = mapped_column(ForeignKey("requisition_versions.id"))
+    supplier: Mapped[str] = mapped_column(String(200))
+    supplier_contact_id: Mapped[str | None] = mapped_column(String(32))
+    prices: Mapped[dict] = mapped_column(JSON)  # {line_key: unit_price}
+    tax: Mapped[float] = mapped_column(Float, default=0)
+    freight: Mapped[float] = mapped_column(Float, default=0)
+    install_fee: Mapped[float] = mapped_column(Float, default=0)
+    lead_time_days: Mapped[int | None] = mapped_column(Integer)
+    valid_until: Mapped[str | None] = mapped_column(String(10))
+    note: Mapped[str] = mapped_column(String(1000), default="")
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active selected rejected
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = TS()
+
+
+class PurchaseOrder(Base):
+    __tablename__ = "purchase_orders"
+    id: Mapped[str] = _id("po")
+    code: Mapped[str] = mapped_column(String(40), unique=True)
+    supplier: Mapped[str] = mapped_column(String(200))
+    supplier_contact_id: Mapped[str | None] = mapped_column(String(32))
+    category: Mapped[str] = mapped_column(String(20), default="原料包材")
+    warehouse_id: Mapped[str | None] = mapped_column(ForeignKey("warehouses.id"), nullable=True)
+    requisition_id: Mapped[str | None] = mapped_column(String(32))
+    requisition_version_id: Mapped[str | None] = mapped_column(String(32))
+    quote_id: Mapped[str | None] = mapped_column(String(32))
+    # draft pending_approval approved ordered partial received closed cancelled rejected
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    expected_date: Mapped[str | None] = mapped_column(String(10))
+    tax: Mapped[float] = mapped_column(Float, default=0)
+    freight: Mapped[float] = mapped_column(Float, default=0)
+    install_fee: Mapped[float] = mapped_column(Float, default=0)
+    note: Mapped[str] = mapped_column(String(1000), default="")
+    approval: Mapped[dict] = mapped_column(JSON, default=dict)  # {required, limit, by, at, meaning, reason}
+    close_reason: Mapped[str] = mapped_column(String(1000), default="")
+    invoice_no: Mapped[str] = mapped_column(String(100), default="")  # 票据号（发票号/收据号，收据可空）
+    invoice_amount: Mapped[float | None] = mapped_column(Float, nullable=True)  # 票据金额
+    doc_type: Mapped[str] = mapped_column(String(16), default="invoice")  # invoice 发票 | receipt 收据 | none 无票据（例外）
+    exceptions: Mapped[list] = mapped_column(JSON, default=list)  # [{step, reason, by, at}] 例外记录，永久保留
+    quick: Mapped[bool] = mapped_column(Boolean, default=False)  # 补录的已完成采购
+    # none invoiced paid_pending reconciled
+    payment_status: Mapped[str] = mapped_column(String(20), default="none")
+    reconcile: Mapped[dict] = mapped_column(JSON, default=dict)
+    owner_id: Mapped[str | None] = mapped_column(String(32))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = TS()
+    updated_at: Mapped[datetime] = TS()
+
+    @property
+    def title(self) -> str:
+        return f"{self.code} {self.supplier}"
+
+
+class POLine(Base):
+    __tablename__ = "po_lines"
+    id: Mapped[str] = _id("pol")
+    po_id: Mapped[str] = mapped_column(ForeignKey("purchase_orders.id"), index=True)
+    sku_id: Mapped[str | None] = mapped_column(ForeignKey("skus.id"), nullable=True)  # 有 SKU 的行收货会入库
+    item_name: Mapped[str] = mapped_column(String(300))
+    unit: Mapped[str] = mapped_column(String(16), default="箱")
+    qty_ordered: Mapped[float] = mapped_column(Float)
+    unit_price: Mapped[float] = mapped_column(Float, default=0)
+    qty_received: Mapped[float] = mapped_column(Float, default=0)
+    qty_rejected: Mapped[float] = mapped_column(Float, default=0)
+    sort: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Receipt(Base):
+    """收货单：现场提交（submitted）→ 有签收单后由仓管签名入账（posted）。"""
+    __tablename__ = "receipts"
+    id: Mapped[str] = _id("rc")
+    code: Mapped[str] = mapped_column(String(40), unique=True)
+    po_id: Mapped[str] = mapped_column(ForeignKey("purchase_orders.id"), index=True)
+    warehouse_id: Mapped[str | None] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="submitted")  # submitted posted voided
+    lines: Mapped[list] = mapped_column(JSON)  # [{po_line_id, qty, rejected, reject_reason, lot_code, expiry, counted}]
+    note: Mapped[str] = mapped_column(String(1000), default="")
+    submitted_by: Mapped[str] = mapped_column(String(32))
+    submitted_at: Mapped[datetime] = TS()
+    posted_by: Mapped[str | None] = mapped_column(String(32))
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    posting_id: Mapped[str | None] = mapped_column(String(32))
+    signature_meaning: Mapped[str] = mapped_column(String(200), default="")
