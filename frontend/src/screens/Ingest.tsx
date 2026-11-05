@@ -5,6 +5,7 @@ import { get, post, upload } from '../lib/api'
 import { dt } from '../lib/fmt'
 import { Badge, Empty, Field, Spinner, Tabs, errMsg, useLoad, useToast } from '../components/ui'
 import { PickButtons, Preview } from '../components/Evidence'
+import { BatchDetail, BatchList } from './Batches'
 
 const ST: Record<string, [string, string]> = {
   inbox: ['待整理', 'yellow'], processing: ['处理中', 'blue'], pending_confirm: ['待确认', 'blue'], conflict: ['冲突', 'red'],
@@ -176,13 +177,15 @@ function TextPreview({ url }: { url: string }) {
 
 export function Ingest() {
   const toast = useToast()
-  const [tab, setTab] = useState('open')
-  const [mode, setMode] = useState('suggest')
   const [sp, setSp] = useSearchParams()
-  const [sel, setSelState] = useState<string | null>(sp.get('item'))
-  const setSel = (id: string | null) => { setSelState(id); setSp(id ? { item: id } : {}, { replace: true }) }
+  const [tab, setTab] = useState(sp.get('batch') ? 'batch' : 'open')
+  const [mode, setMode] = useState('suggest')
+  const [sel, setSelState] = useState<string | null>(sp.get('item') || sp.get('batch'))
+  const setSel = (id: string | null) => { setSelState(id); setSp(id ? { [tab === 'batch' ? 'batch' : 'item']: id } : {}, { replace: true }) }
+  const [bv, setBv] = useState(0)
   const statusQ = tab === 'open' ? 'inbox,pending_confirm,conflict,processing' : tab
-  const list = useLoad(() => get(`/api/ingest?status=${statusQ}`), [statusQ])
+  const list = useLoad(() => (tab === 'batch' ? Promise.resolve([]) : get(`/api/ingest?status=${statusQ}`)), [statusQ])
+  const pendingBatches = useLoad(() => get('/api/batches?status=proposed'), [bv])
   const counts = useLoad(() => get('/api/ingest/counts'), [])
   const send = async (files: FileList) => {
     for (const f of Array.from(files)) {
@@ -195,12 +198,13 @@ export function Ingest() {
   const tabs = [
     { key: 'open', label: `待处理 ${(c.inbox || 0) + (c.pending_confirm || 0) + (c.conflict || 0)}` },
     { key: 'conflict', label: `冲突 ${c.conflict || 0}` }, { key: 'applied', label: `已应用 ${c.applied || 0}` },
+    { key: 'batch', label: `批量导入${pendingBatches.data?.length ? ` · 待确认 ${pendingBatches.data.length}` : ''}` },
     { key: 'evidence_only', label: `仅存证 ${c.evidence_only || 0}` }, { key: 'rejected', label: `已驳回 ${c.rejected || 0}` },
   ]
   return (
     <div className="mx-auto max-w-7xl">
       <h1 className="mb-3 text-xl font-bold">资料接入与更新中心</h1>
-      <div className="card mb-4 p-4">
+      <div className={`card mb-4 p-4 ${tab === 'batch' ? 'hidden sm:block' : ''}`}>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
             <label className="flex min-h-[36px] items-center gap-1.5"><input type="radio" checked={mode === 'suggest'} onChange={() => setMode('suggest')} />识别并建议更新</label>
@@ -212,6 +216,15 @@ export function Ingest() {
       </div>
       <div className="card p-4">
         <Tabs tabs={tabs} value={tab} onChange={(k) => { setTab(k); setSel(null) }} />
+        {tab === 'batch' ? (
+          <div className="grid gap-4 pt-4 lg:grid-cols-[320px_1fr]">
+            <div className={sel ? 'hidden lg:block' : ''}><BatchList sel={sel} onSelect={setSel} version={bv} /></div>
+            <div className={sel ? '' : 'hidden lg:block'}>
+              {sel && <button className="btn-ghost -ml-2 mb-2 lg:hidden" onClick={() => setSel(null)}><ArrowLeft size={16} />返回列表</button>}
+              {sel ? <BatchDetail key={sel} id={sel} onChanged={() => setBv((v) => v + 1)} /> : <div className="text-sm text-slate-400">选择左侧批次逐行确认</div>}
+            </div>
+          </div>
+        ) : (
         <div className="grid gap-4 pt-4 lg:grid-cols-[320px_1fr]">
           <div className={`space-y-1 ${sel ? 'hidden lg:block' : ''}`}>
             {(list.data || []).map((it: any) => (
@@ -228,6 +241,7 @@ export function Ingest() {
             {sel ? <ItemDetail key={sel} id={sel} onChanged={() => { list.reload(); counts.reload() }} /> : <Field label=""><div className="text-sm text-slate-400">选择左侧资料查看原件并确认变更</div></Field>}
           </div>
         </div>
+        )}
       </div>
     </div>
   )
