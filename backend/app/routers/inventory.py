@@ -98,7 +98,8 @@ def posting_out(db: Session, p: InventoryPosting, duplicate=False):
 @router.get("/master")
 def master(u: User = Depends(current_user), db: Session = Depends(get_db)):
     return {
-        "warehouses": [{"id": w.id, "code": w.code, "name": w.name, "kind": w.kind} for w in db.query(Warehouse).all()],
+        "warehouses": [{"id": w.id, "code": w.code, "name": w.name, "kind": w.kind, "tracked": w.tracked, "active": w.active}
+                       for w in db.query(Warehouse).order_by(Warehouse.tracked.desc(), Warehouse.name)],
         "skus": [{"id": s.id, "code": s.code, "name": s.name, "category": s.category, "base_unit": s.base_unit,
                   "conversions": s.conversions, "barcode": s.barcode} for s in db.query(Sku).order_by(Sku.code)],
         "lots": [{"id": l.id, "sku_id": l.sku_id, "lot_code": l.lot_code, "expiry": l.expiry,
@@ -146,6 +147,43 @@ def set_safety(body: SafetyIn, u: User = Depends(current_user), db: Session = De
     return {"ok": True}
 
 
+class WarehouseIn(BaseModel):
+    code: str
+    name: str
+    kind: str = "external"
+    tracked: bool = True
+    active: bool = True
+
+
+@router.post("/warehouses")
+def create_warehouse(body: WarehouseIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """新增仓库或来源地。tracked=False 表示不在本系统管账（例如多伦多、温哥华），只用于调入来源。"""
+    require(u, "inventory.master")
+    if body.kind not in ("main", "external", "company"):
+        raise HTTPException(400, "类型无效")
+    if db.query(Warehouse).filter_by(code=body.code.strip().upper()).first():
+        raise HTTPException(409, "编码已存在")
+    w = Warehouse(code=body.code.strip().upper(), name=body.name.strip(), kind=body.kind, tracked=body.tracked, active=body.active)
+    db.add(w)
+    audit(db, u, "warehouse.created", "warehouse", w.id, code=w.code, tracked=w.tracked)
+    db.commit()
+    return {"id": w.id}
+
+
+@router.patch("/warehouses/{wid}")
+def update_warehouse(wid: str, body: WarehouseIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    require(u, "inventory.master")
+    w = get_or_404(db, Warehouse, wid)
+    if w.tracked and not body.tracked:
+        has = db.query(func.count(InventoryTxn.id)).filter_by(warehouse_id=wid, bucket="on_hand").scalar()
+        if has:
+            raise HTTPException(409, "该仓库已有库存流水，不能改为不管账")
+    w.name, w.kind, w.tracked, w.active = body.name.strip(), body.kind, body.tracked, body.active
+    audit(db, u, "warehouse.updated", "warehouse", w.id, tracked=w.tracked, active=w.active)
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/scan/{code}")
 def scan(code: str, u: User = Depends(current_user), db: Session = Depends(get_db)):
     """扫码解析：支持 SKU 编码/条码、Lot 码（LOT:<sku>:<lot> 或 lot_code）、调拨单号。"""
@@ -169,6 +207,10 @@ def scan(code: str, u: User = Depends(current_user), db: Session = Depends(get_d
     tr = db.query(Transfer).filter_by(code=code).first()
     if tr:
         return {"type": "transfer", "transfer_id": tr.id}
+    from ..models import PurchaseOrder
+    po = db.query(PurchaseOrder).filter_by(code=code).first()
+    if po:
+        return {"type": "po", "po_id": po.id, "code": po.code}
     raise HTTPException(404, f"未识别的编码：{code}")
 
 
@@ -435,11 +477,14 @@ def release_reservation(rid: str, u: User = Depends(current_user), db: Session =
 
 # ---------- transfers ----------
 def transfer_out(db: Session, t: Transfer):
-    whs = {w.id: w.name for w in db.query(Warehouse).all()}
+    whobj = {w.id: w for w in db.query(Warehouse).all()}
+    whs = {k: w.name for k, w in whobj.items()}
     skus = {s.id: s for s in db.query(Sku).all()}
     lots = {l.id: l for l in db.query(Lot).all()}
     lines = db.query(TransferLine).filter_by(transfer_id=t.id).all()
+    src = whobj.get(t.from_wh)
     return {"id": t.id, "code": t.code, "from_wh": t.from_wh, "to_wh": t.to_wh, "from_name": whs.get(t.from_wh),
+            "inbound": bool(src and not src.tracked),  # 调入：来源地不在本系统管账
             "to_name": whs.get(t.to_wh), "status": t.status, "expected_date": t.expected_date, "note": t.note,
             "version": t.version, "created_at": t.created_at,
             "lines": [{"id": l.id, "sku_id": l.sku_id, "sku_code": skus[l.sku_id].code, "sku_name": skus[l.sku_id].name,
@@ -466,6 +511,8 @@ def get_transfer(tid: str, u: User = Depends(current_user), db: Session = Depend
 class TLineIn(BaseModel):
     sku_id: str
     lot_id: str | None = None
+    lot_code: str | None = None  # 调入时批次常常是对方新给的，直接手填
+    expiry: str | None = None
     qty: float
 
 
@@ -475,6 +522,7 @@ class TransferIn(BaseModel):
     expected_date: str | None = None
     note: str = ""
     lines: list[TLineIn]
+    shipped_now: bool = False  # 对方已发出：按单据数量直接记为在途（常用于多伦多/温哥华调入）
 
 
 @router.post("/transfers")
@@ -489,11 +537,41 @@ def create_transfer(body: TransferIn, u: User = Depends(current_user), db: Sessi
                  expected_date=body.expected_date, note=body.note, created_by=u.id)
     db.add(t)
     db.flush()
+    created = []
     for l in body.lines:
-        db.add(TransferLine(transfer_id=t.id, sku_id=l.sku_id, lot_id=l.lot_id, qty_requested=l.qty))
-    audit(db, u, "transfer.created", "transfer", t.id, code=t.code)
+        lot_id = l.lot_id
+        if not lot_id and (l.lot_code or "").strip():
+            lot_id = get_or_create_lot(db, l.sku_id, l.lot_code, l.expiry).id
+        tl = TransferLine(transfer_id=t.id, sku_id=l.sku_id, lot_id=lot_id, qty_requested=l.qty)
+        db.add(tl)
+        created.append(tl)
+    db.flush()
+    audit(db, u, "transfer.created", "transfer", t.id, code=t.code, shipped_now=body.shipped_now)
+    if body.shipped_now:
+        p = begin_posting(db, u, f"transfer-create-ship:{t.id}", "transfer_ship", "transfer", t.id)
+        _ship_lines(db, u, t, p, [(tl, tl.qty_requested) for tl in created])
     db.commit()
     return transfer_out(db, t)
+
+
+def _ship_lines(db: Session, u: User, t: Transfer, p, pairs):
+    """来源仓管账：检查并扣减来源仓；来源地不管账（多伦多/温哥华）：只记目的仓在途。"""
+    src = db.get(Warehouse, t.from_wh)
+    for l, qty in pairs:
+        if qty <= 0:
+            continue
+        assert_usable(db, l.lot_id, "调拨发运")
+        if src.tracked:
+            have = balance(db, l.sku_id, t.from_wh, "on_hand", l.lot_id)
+            if qty > have + 1e-9:
+                db.rollback()
+                raise HTTPException(409, f"来源仓账面不足：现有 {have}")
+            txn(db, p, l.sku_id, t.from_wh, "on_hand", -qty, l.lot_id)
+        txn(db, p, l.sku_id, t.to_wh, "in_transit", qty, l.lot_id)
+        l.qty_shipped += qty
+    t.status = "shipped" if t.status == "requested" else t.status
+    t.version += 1
+    audit(db, u, "transfer.shipped", "transfer", t.id, posting=p.id, source_tracked=src.tracked)
 
 
 class ShipLine(BaseModel):
@@ -517,23 +595,13 @@ def ship(tid: str, body: ShipIn, u: User = Depends(current_user), db: Session = 
     except Dup as d:
         return {**posting_out(db, d.posting, True), "transfer": transfer_out(db, t)}
     lines = {l.id: l for l in db.query(TransferLine).filter_by(transfer_id=t.id)}
+    pairs = []
     for sl in body.lines:
-        if sl.qty <= 0:
-            continue
         l = lines.get(sl.line_id)
         if not l:
             raise HTTPException(400, "行不存在")
-        assert_usable(db, l.lot_id, "调拨发运")
-        have = balance(db, l.sku_id, t.from_wh, "on_hand", l.lot_id)
-        if sl.qty > have + 1e-9:
-            db.rollback()
-            raise HTTPException(409, f"来源仓账面不足：现有 {have}")
-        txn(db, p, l.sku_id, t.from_wh, "on_hand", -sl.qty, l.lot_id)
-        txn(db, p, l.sku_id, t.to_wh, "in_transit", sl.qty, l.lot_id)
-        l.qty_shipped += sl.qty
-    t.status = "shipped" if t.status == "requested" else t.status
-    t.version += 1
-    audit(db, u, "transfer.shipped", "transfer", t.id, posting=p.id)
+        pairs.append((l, sl.qty))
+    _ship_lines(db, u, t, p, pairs)
     db.commit()
     return {**posting_out(db, p), "transfer": transfer_out(db, t)}
 

@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..core import audit, can, can_read_evidence, current_user, get_or_404, require, sign_file, verify_file_sig
+from ..core import audit, can, can_read_evidence, current_user, get_or_404, require, self_review_allowed, sign_file, verify_file_sig
 from ..db import UPLOAD_DIR, get_db
 from ..models import Evidence, EvidenceLink, EvidenceVersion, User
 
@@ -249,14 +249,15 @@ def verify(lid: str, body: VerifyIn, u: User = Depends(current_user), db: Sessio
         raise HTTPException(403, "无权查看此证据")
     if body.status not in ("approved", "rejected"):
         raise HTTPException(400, "无效核验结果")
-    if body.status == "approved" and ver.uploaded_by == u.id:
-        raise HTTPException(409, "上传人不能核验自己上传的证据（分人复核）")
+    self_check = ver.uploaded_by == u.id
+    if body.status == "approved" and self_check and not self_review_allowed(u):
+        raise HTTPException(409, "上传人不能核验自己上传的证据（标准模式要求分人复核）")
     if body.status == "rejected" and not body.note.strip():
         raise HTTPException(400, "驳回需填写意见")
-    l.verify_status, l.verify_note = body.status, body.note
+    l.verify_status, l.verify_note = body.status, (("（本人核验）" if self_check else "") + body.note).strip()
     l.verified_by, l.verified_at = u.id, datetime.now(timezone.utc)
     audit(db, u, f"evidence.{body.status}", l.target_type, l.target_id, evidence=ev.id, version=ver.version_no,
-          purpose=l.purpose, signature_meaning="核验证据与用途相符", note=body.note)
+          purpose=l.purpose, signature_meaning="核验证据与用途相符", note=body.note, self_check=self_check)
     db.commit()
     return {"ok": True}
 

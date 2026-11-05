@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..core import audit, current_user
 from ..db import get_db
-from ..models import AgentToken, BusinessRecord, Task, Transfer, User
+from ..models import AgentToken, BusinessRecord, PurchaseOrder, Task, Transfer, User
 from ..routers.evidence import create_link, ingest_file
 from . import tools as T
 from .oauth import SCOPES, agent_auth, public_base
@@ -198,7 +198,7 @@ _uploads: dict[str, int] = defaultdict(int)
 
 
 def _target_title(db, d):
-    model = {"task": Task, "record": BusinessRecord, "transfer": Transfer}[d["t"]]
+    model = {"task": Task, "record": BusinessRecord, "transfer": Transfer, "po": PurchaseOrder}[d["t"]]
     obj = db.get(model, d["i"])
     if not obj:
         raise HTTPException(404, "目标不存在")

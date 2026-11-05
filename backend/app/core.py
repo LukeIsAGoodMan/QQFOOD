@@ -47,6 +47,28 @@ ROLES = {
     "sys_admin": "系统管理员",
 }
 
+# 系统管理员默认拥有全部业务权限（便于一人验收与维护）。正式运营如需分权，设置 QQ_ADMIN_ALL_PERMS=0。
+ADMIN_ALL_PERMS = os.environ.get("QQ_ADMIN_ALL_PERMS", "1") != "0"
+
+# 团队模式（PRD SEC：小团队精简权限）
+#   simple   精简（默认）：老板 / 主管 / 系统管理员 = 全部权限；允许本人核验、本人批准（标注“本人”并留审计）。
+#   standard 标准：按岗位分权，关键步骤分人复核。人多了以后在「用户与角色」切换。
+ORG = {"mode": os.environ.get("QQ_ORG_MODE", "simple")}
+MANAGER_ROLES = {"boss", "ops_manager", "sys_admin"}
+
+
+def simple_mode() -> bool:
+    return ORG["mode"] == "simple"
+
+
+def role_label(role: str) -> str:
+    base = ROLES.get(role, role)
+    if role == "sys_admin" and ADMIN_ALL_PERMS:
+        return "系统管理员（全部权限）"
+    if simple_mode() and role in MANAGER_ROLES:
+        return f"{base}（全部权限）"
+    return base
+
 # Single permission matrix. Server is the source of truth; the UI only mirrors it.
 PERMS: dict[str, set[str]] = {
     "page.edit": {"sys_admin", "page_admin", "ops_manager"},
@@ -66,6 +88,11 @@ PERMS: dict[str, set[str]] = {
     "notebook.manage": {"boss", "ops_manager", "sys_admin"},
     "audit.view": {"boss", "ops_manager", "sys_admin", "quality"},
     "users.manage": {"sys_admin"},
+    "po.manage": {"purchaser", "ops_manager", "boss"},
+    "po.approve": {"boss"},
+    "po.receive": {"warehouse", "ops_manager", "purchaser", "staff", "production"},
+    "finance.reconcile": {"hr_finance", "boss"},
+    "settings.purchasing": {"boss"},
     "ingest.apply": {"boss", "ops_manager", "purchaser", "warehouse", "production", "quality", "hr_finance"},
 }
 
@@ -93,8 +120,18 @@ def login_failed(key: str):
     _FAILS.setdefault(key.lower(), []).append(time.time())
 
 
+def is_superuser(user: User) -> bool:
+    """全部权限：系统管理员（默认），或精简模式下的老板/主管。"""
+    return (ADMIN_ALL_PERMS and user.role == "sys_admin") or (simple_mode() and user.role in MANAGER_ROLES)
+
+
+def self_review_allowed(user: User) -> bool:
+    """精简模式下允许本人核验/本人入账（系统标注“本人”）；标准模式要求分人复核。"""
+    return simple_mode()
+
+
 def can(user: User, perm: str) -> bool:
-    return user.role in PERMS.get(perm, set())
+    return is_superuser(user) or user.role in PERMS.get(perm, set())
 
 
 def require(user: User, perm: str):
@@ -104,7 +141,7 @@ def require(user: User, perm: str):
 
 def can_read_evidence(user: User, sensitivity: str) -> bool:
     allowed = EVIDENCE_READ.get(sensitivity, set())
-    return allowed is None or user.role in allowed
+    return allowed is None or user.role in allowed or is_superuser(user)
 
 
 # ---- passwords ----

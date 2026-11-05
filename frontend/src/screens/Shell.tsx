@@ -165,7 +165,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <div className="ml-auto flex items-center gap-0.5">
             <button className="btn-ghost md:hidden" onClick={() => setSearch(true)} aria-label={t('common.search')}><Search size={20} /></button>
             <Notifications />
-            <Link to="/me" className="btn-ghost text-sm"><span className="hidden sm:inline">{me?.name}</span><span className="chip bg-slate-100 text-slate-500">{me?.role_label}</span></Link>
+            <Link to="/me" className="btn-ghost text-sm"><span className="hidden sm:inline">{me?.name}</span><span className="chip max-w-[7.5rem] truncate bg-slate-100 text-slate-500 sm:max-w-none">{me?.role_label.replace('（全部权限）', '')}</span></Link>
             <button className="btn-ghost hidden sm:inline-flex" onClick={logout} title={t('nav.logout')}><LogOut size={18} /></button>
           </div>
         </header>

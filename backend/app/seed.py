@@ -7,7 +7,8 @@ import uuid
 from .core import hash_secret, encrypt_secret
 from .db import SessionLocal
 from .models import (AccountEntry, Contact, FieldDefinition, NotebookNote, Page, PageVersion, RecordType, SafetyStock,
-                     Site, Sku, Task, Transfer, TransferLine, User, Warehouse, BusinessRecord, Lot, gid)
+                     Site, Sku, Task, Transfer, TransferLine, User, Warehouse, BusinessRecord, Lot, AppSetting, POLine, PurchaseOrder,
+                     Quote, Requisition, RequisitionVersion, gid)
 from .routers.pages import normalize_layout
 
 DEMO_PASSWORD = os.environ.get("QQ_DEMO_PASSWORD", "qq597demo")
@@ -24,6 +25,71 @@ USERS = [
 def m(type_, title, width="full", **config):
     return {"id": gid("mod"), "type": type_, "title": title, "width": width, "hidden": False, "version": 1,
             "config": config}
+
+
+def PROCUREMENT_MODULES():
+    return [
+        m("metric", "", "third", metric="po_pending_approval"), m("metric", "", "third", metric="po_overdue"),
+        m("metric", "", "third", metric="receipts_pending"),
+        m("purchasing", "采购单与收货"),
+        m("requisitions", "需求与报价对比"),
+    ]
+
+
+def canada_sources():
+    return [Warehouse(code="TOR", name="多伦多（公司）", kind="company", tracked=False),
+            Warehouse(code="VAN", name="温哥华（公司）", kind="company", tracked=False)]
+
+
+def upgrade_sources():
+    """一次性：已上线的库补上多伦多、温哥华两个来源地（不在本系统管账）。"""
+    db = SessionLocal()
+    try:
+        if not db.query(User).count() or db.get(AppSetting, "migration:canada_sources_v1"):
+            return
+        have = {w.code for w in db.query(Warehouse)}
+        db.add_all([w for w in canada_sources() if w.code not in have])
+        db.add(AppSetting(key="migration:canada_sources_v1", value={"done": True}))
+        db.commit()
+    finally:
+        db.close()
+
+
+def upgrade_pages():
+    """一次性升级已上线库的页面：采购页换成采购闭环模块（旧模块隐藏保留），老板总览加采购指标。以新页面版本发布，可回滚。"""
+    db = SessionLocal()
+    try:
+        if not db.query(User).count() or db.get(AppSetting, "migration:procurement_v1"):
+            return
+        actor = db.query(User).filter_by(role="ops_manager").first() or db.query(User).first()
+
+        def republish(p, modules, note):
+            cur = db.get(PageVersion, p.published_version_id) if p.published_version_id else None
+            layout = normalize_layout({"modules": modules})
+            n = (max([v.version_no for v in db.query(PageVersion).filter_by(page_id=p.id)] or [0])) + 1
+            v = PageVersion(page_id=p.id, version_no=n, layout=layout, note=note, published_by=actor.id)
+            db.add(v)
+            db.flush()
+            p.published_version_id, p.draft, p.draft_rev = v.id, copy.deepcopy(layout), p.draft_rev + 1
+            return cur
+
+        for p in db.query(Page).filter_by(name="采购"):
+            cur = db.get(PageVersion, p.published_version_id) if p.published_version_id else None
+            old = [{**x, "hidden": True} for x in (cur.layout["modules"] if cur else [])]
+            republish(p, PROCUREMENT_MODULES() + old, "系统升级：采购到收货闭环（原通用采购台账已隐藏，可在编辑器中重新显示或回滚）")
+        for p in db.query(Page).filter_by(name="老板总览"):
+            cur = db.get(PageVersion, p.published_version_id) if p.published_version_id else None
+            mods = list(cur.layout["modules"]) if cur else []
+            have = {x.get("config", {}).get("metric") for x in mods}
+            add = [m("metric", "", "third", metric=k) for k in ("po_pending_approval", "po_overdue", "receipts_pending") if k not in have]
+            last_metric = max([i for i, x in enumerate(mods) if x["type"] == "metric"] or [-1])
+            republish(p, mods[:last_metric + 1] + add + mods[last_metric + 1:], "系统升级：加入采购指标")
+        if not db.get(AppSetting, "purchasing"):
+            db.add(AppSetting(key="purchasing", value={"approval_limit": 2000}))
+        db.add(AppSetting(key="migration:procurement_v1", value={"done": True}))
+        db.commit()
+    finally:
+        db.close()
 
 
 def seed_if_empty():
@@ -47,7 +113,7 @@ def seed_if_empty():
         # ---- inventory master (示例) ----
         wh597 = Warehouse(code="WH597", name="597 主场地", kind="main", site_id=site.id)
         ext = Warehouse(code="EXT1", name="外库 1（示例）", kind="external")
-        db.add_all([wh597, ext])
+        db.add_all([wh597, ext] + canada_sources())
         skus = {
             "RM-BEEF": Sku(code="RM-BEEF", name="示例 冷冻牛肉卷", category="原料", base_unit="箱", conversions={"磅": 20}),
             "RM-SPICE": Sku(code="RM-SPICE", name="示例 香料包", category="原料", base_unit="箱", conversions={"包": 50}),
@@ -109,10 +175,35 @@ def seed_if_empty():
 
         db.add(BusinessRecord(record_type_id=eq_rt.id, title="研磨机", status="已发货", owner_id=ops.id,
                               data={eq_f["设备/项目"]: "研磨机", eq_f["位置"]: "597 生产区"}, created_by=ops.id))
-        db.add(BusinessRecord(record_type_id=po_rt.id, title="原料包材询价（需求版本 v2：15% 余量）", status="询价",
-                              owner_id=users["buyer"].id,
-                              data={po_f["类别"]: "原料包材", po_f["需求版本"]: "v2 (15%)；v1 询价曾用 5%"},
-                              created_by=users["buyer"].id))
+        # ---- 采购示例：需求 v1(5%) → v2(15%)，v2 两家报价；另一张已下单采购单（示例数据）----
+        buyer = users["buyer"]
+        rq = Requisition(code="RQ-DEMO-001", title="原料包材询价（示例）", category="原料包材", owner_id=buyer.id, created_by=buyer.id)
+        db.add(rq)
+        db.flush()
+        base = [{"key": "L1", "sku_id": skus["PK-TRAY"].id, "item_name": "示例 包装托盘", "base_qty": 100, "unit": "箱"},
+                {"key": "L2", "sku_id": skus["RM-SPICE"].id, "item_name": "示例 香料包", "base_qty": 40, "unit": "箱"}]
+        v1 = RequisitionVersion(requisition_id=rq.id, version_no=1, margin_pct=5, lines=base, note="首次询价按 5% 余量", created_by=buyer.id)
+        db.add(v1)
+        db.flush()
+        v2 = RequisitionVersion(requisition_id=rq.id, version_no=2, margin_pct=15, lines=base, note="后续计划按 15% 余量", created_by=buyer.id)
+        db.add(v2)
+        db.flush()
+        rq.current_version_id = v2.id
+        db.add(Quote(requisition_id=rq.id, version_id=v1.id, supplier="示例供应商 A", prices={"L1": 11.5, "L2": 38}, freight=60,
+                     lead_time_days=10, note="按 v1 报价", created_by=buyer.id))
+        db.add(Quote(requisition_id=rq.id, version_id=v2.id, supplier="示例供应商 A", prices={"L1": 11.5, "L2": 38}, freight=60,
+                     tax=0, lead_time_days=10, created_by=buyer.id))
+        db.add(Quote(requisition_id=rq.id, version_id=v2.id, supplier="示例供应商 B", prices={"L1": 10.8, "L2": 41}, freight=120,
+                     lead_time_days=6, created_by=buyer.id))
+        po = PurchaseOrder(code="PO-DEMO-001", supplier="示例供应商 C", category="原料包材", warehouse_id=wh597.id, status="ordered",
+                           expected_date=None, freight=45, owner_id=buyer.id, created_by=buyer.id, note="示例：已下单待到货",
+                           approval={"required": False, "limit": 2000, "total": 1045})
+        db.add(po)
+        db.flush()
+        db.add(POLine(po_id=po.id, sku_id=skus["RM-BEEF"].id, item_name="示例 冷冻牛肉卷", unit="箱", qty_ordered=20, unit_price=50, sort=0))
+        db.add(AppSetting(key="purchasing", value={"approval_limit": 2000}))
+        db.add(AppSetting(key="migration:procurement_v1", value={"done": True}))
+        db.add(AppSetting(key="migration:canada_sources_v1", value={"done": True}))
 
         # ---- 初始化待核验事项（PRD 附录A）----
         init_tasks = [
@@ -165,7 +256,8 @@ def seed_if_empty():
             m("metric", "", "third", metric="open_exceptions"), m("metric", "", "third", metric="below_safety"),
             m("metric", "", "third", metric="quarantined_lots"), m("metric", "", "third", metric="missing_checklists"),
             m("metric", "", "third", metric="unverified_evidence"), m("metric", "", "third", metric="pending_ingest"),
-            m("metric", "", "third", metric="in_transit"),
+            m("metric", "", "third", metric="in_transit"), m("metric", "", "third", metric="po_pending_approval"),
+            m("metric", "", "third", metric="po_overdue"), m("metric", "", "third", metric="receipts_pending"),
             m("kanban", "待决策 / 受阻 / 待核验", source="tasks", task_filter={"status": "blocked,review"}),
         ]}, roles=mgmt, desc="每个指标都能下钻；没有数据显示未知，不显示正常")
         page("任务与异常", "list-checks", "总览", 2, {"modules": [
@@ -173,13 +265,7 @@ def seed_if_empty():
             m("metric", "", "third", metric="open_exceptions"),
             m("kanban", "全部任务", source="tasks", task_filter={}),
         ]})
-        page("采购", "shopping-cart", "业务", 10, {"modules": [
-            m("metric", "", "third", metric=f"records:{po_rt.id}:已下单|已发货"),
-            m("metric", "", "third", metric=f"records:{po_rt.id}:已收货"),
-            m("form", "新建采购单", "third", source="records", record_type_id=po_rt.id),
-            m("table", "采购单", source="records", record_type_id=po_rt.id,
-              columns=["title", "status", po_f["供应商"], po_f["类别"], po_f["金额"], po_f["预计到货"], "owner"]),
-        ]})
+        page("采购", "shopping-cart", "业务", 10, {"modules": PROCUREMENT_MODULES()})
         page("场地运营", "hammer", "业务", 11, {"modules": [
             m("kanban", "设备与建设进度", source="records", record_type_id=eq_rt.id),
             m("form", "新增设备/项目", "half", source="records", record_type_id=eq_rt.id),

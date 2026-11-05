@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react'
-import { ChevronDown, ChevronRight, Download, PackageCheck, Plus, Printer, ShieldAlert, ShieldCheck, Truck } from 'lucide-react'
+import { ChevronDown, ChevronRight, Download, PackageCheck, Plus, Printer, ShieldAlert, ShieldCheck, Truck, Warehouse } from 'lucide-react'
 import { get, post, uuid } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { ago, dt, num } from '../lib/fmt'
@@ -27,13 +27,13 @@ function useScanResolver(master: any, onSku: (id: string) => void, onLot: (lot: 
 function ReceiveDialog({ master, onClose, onDone }: { master: any; onClose: () => void; onDone: () => void }) {
   const toast = useToast()
   const [key] = useState(uuid())
-  const [f, setF] = useState<any>({ sku_id: '', warehouse_id: master.warehouses[0]?.id, qty: '', unit: '', lot_code: '', expiry: '', counted: true, source_id: '' })
+  const [f, setF] = useState<any>({ sku_id: '', warehouse_id: master.warehouses.find((w: any) => w.tracked)?.id, qty: '', unit: '', lot_code: '', expiry: '', counted: true, source_id: '', source_kind: 'company' })
   const [posting, setPosting] = useState<any>(null)
   const sku = master.skus.find((s: any) => s.id === f.sku_id)
   const scan = useScanResolver(master, (id) => setF((x: any) => ({ ...x, sku_id: id })), (lot) => setF((x: any) => ({ ...x, lot_code: lot.lot_code })))
   const save = async () => {
     try {
-      const r = await post('/api/inv/receive', { ...f, idempotency_key: key, qty: Number(f.qty), unit: f.unit || null, lot_code: f.lot_code || null, expiry: f.expiry || null, source_type: f.source_id ? 'po' : null, source_id: f.source_id || null })
+      const r = await post('/api/inv/receive', { ...f, idempotency_key: key, qty: Number(f.qty), unit: f.unit || null, lot_code: f.lot_code || null, expiry: f.expiry || null, source_type: f.source_kind, source_id: f.source_id || null })
       setPosting(r); onDone()
       toast(r.duplicate ? '重复提交已拦截，库存未重复增加' : '已入账')
     } catch (e) { toast(errMsg(e), 'err') }
@@ -49,7 +49,9 @@ function ReceiveDialog({ master, onClose, onDone }: { master: any; onClose: () =
         <div className="space-y-3">
           <ScanButton onResult={scan} />
           <Field label="SKU"><select className="input" value={f.sku_id} onChange={(e) => setF({ ...f, sku_id: e.target.value, unit: '' })}><option value="">—</option>{master.skus.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select></Field>
-          <Field label="仓库"><select className="input" value={f.warehouse_id} onChange={(e) => setF({ ...f, warehouse_id: e.target.value })}>{master.warehouses.map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}</select></Field>
+          <Field label="仓库"><select className="input" value={f.warehouse_id} onChange={(e) => setF({ ...f, warehouse_id: e.target.value })}>{master.warehouses.filter((w: any) => w.tracked && w.active).map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}</select></Field>
+          <Field label="货从哪来"><select className="input" value={f.source_kind} onChange={(e) => setF({ ...f, source_kind: e.target.value })}>
+            <option value="po">采购到货</option><option value="company">公司调入（多伦多、温哥华等）</option><option value="other">其他（退货、样品、期初…）</option></select></Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label={t('inv.qty')}><input className="input text-lg" type="number" inputMode="decimal" value={f.qty} onChange={(e) => setF({ ...f, qty: e.target.value })} /></Field>
             <Field label="单位" hint={sku && Object.keys(sku.conversions || {}).length ? `1 ${sku.base_unit} = ${Object.entries(sku.conversions).map(([u, n]) => `${n} ${u}`).join(' / ')}` : '未定义其他单位'}>
@@ -61,7 +63,7 @@ function ReceiveDialog({ master, onClose, onDone }: { master: any; onClose: () =
             <Field label={t('inv.lot')}><input className="input" value={f.lot_code} onChange={(e) => setF({ ...f, lot_code: e.target.value })} /></Field>
             <Field label="到期日"><input className="input" type="date" value={f.expiry} onChange={(e) => setF({ ...f, expiry: e.target.value })} /></Field>
           </div>
-          <Field label="来源单据（PO 号等）"><input className="input" value={f.source_id} onChange={(e) => setF({ ...f, source_id: e.target.value })} /></Field>
+          <Field label={f.source_kind === 'po' ? '采购单号' : f.source_kind === 'company' ? '来源与单据（如 多伦多 BOL 12345）' : '说明'}><input className="input" value={f.source_id} onChange={(e) => setF({ ...f, source_id: e.target.value })} /></Field>
           <div className="flex gap-2">
             <button type="button" className={`btn flex-1 ring-1 ${f.counted ? 'bg-emerald-600 text-white ring-emerald-600' : 'ring-slate-300'}`} onClick={() => setF({ ...f, counted: true })}>{t('inv.counted')}</button>
             <button type="button" className={`btn flex-1 ring-1 ${!f.counted ? 'bg-amber-500 text-white ring-amber-500' : 'ring-slate-300'}`} onClick={() => setF({ ...f, counted: false })}>{t('inv.estimated')}</button>
@@ -130,9 +132,10 @@ export function StockModule(_: ModProps) {
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <select className="input w-auto flex-1 sm:flex-none" value={wh} onChange={(e) => setWh(e.target.value)}>
-          <option value="">全部仓库</option>{master.data.warehouses.map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}
+          <option value="">全部仓库</option>{master.data.warehouses.filter((w: any) => w.tracked).map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}
         </select>
         {can('inventory.post') && <button className="btn-primary" onClick={() => setDlg({ type: 'receive' })}><PackageCheck size={16} />{t('inv.receive')}</button>}
+        {can('inventory.master') && <button className="btn-secondary" onClick={() => setDlg({ type: 'warehouses' })}><Warehouse size={16} />仓库与来源地</button>}
         <span className="w-full text-xs text-slate-400 sm:ml-auto sm:w-auto">计算于 {ago(stock.data.computed_at)} · 可用 = 实物 − 隔离/待放行 − 预留；未核数不计入</span>
       </div>
       {/* phones: one card per SKU × warehouse, available qty first */}
@@ -233,7 +236,41 @@ export function StockModule(_: ModProps) {
       {dlg?.type === 'count' && <CountDialog master={master.data} row={dlg.row} lot={dlg.lot} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'issue' && <IssueDialog row={dlg.row} lot={dlg.lot} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'label' && <LotLabel sku={dlg.sku} lot={dlg.lot} onClose={() => setDlg(null)} />}
+      {dlg?.type === 'warehouses' && <Warehouses list={master.data.warehouses} onClose={() => setDlg(null)} onChanged={reload} />}
     </div>
+  )
+}
+
+const WH_KIND: Record<string, string> = { main: '主场地', external: '外库（第三方）', company: '公司其他地点' }
+
+function Warehouses({ list, onClose, onChanged }: { list: any[]; onClose: () => void; onChanged: () => void }) {
+  const toast = useToast()
+  const [f, setF] = useState<any>({ code: '', name: '', kind: 'company', tracked: false })
+  const add = async () => {
+    try { await post('/api/inv/warehouses', f); setF({ code: '', name: '', kind: 'company', tracked: false }); onChanged() } catch (e) { toast(errMsg(e), 'err') }
+  }
+  return (
+    <Modal open onClose={onClose} title="仓库与来源地">
+      <p className="mb-3 text-sm text-slate-600">「在本系统管账」的仓库会记录库存；多伦多、温哥华这类只作为货物来源、库存不在这里管的地点，选「不管账」——调入时不会检查或扣减它们的库存。</p>
+      <div className="space-y-2">
+        {list.map((w) => (
+          <div key={w.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 p-2 text-sm">
+            <span className="font-medium">{w.name}</span><span className="text-xs text-slate-400">{w.code} · {WH_KIND[w.kind] || w.kind}</span>
+            <Badge color={w.tracked ? 'green' : 'gray'}>{w.tracked ? '在本系统管账' : '不管账（仅来源地）'}</Badge>
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 space-y-2 rounded-lg bg-slate-50 p-3">
+        <div className="text-sm font-semibold">新增</div>
+        <div className="grid grid-cols-2 gap-2">
+          <input className="input" placeholder="编码，如 MTL" value={f.code} onChange={(e) => setF({ ...f, code: e.target.value })} />
+          <input className="input" placeholder="名称，如 蒙特利尔（公司）" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+          <select className="input" value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}>{Object.entries(WH_KIND).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+          <select className="input" value={f.tracked ? '1' : '0'} onChange={(e) => setF({ ...f, tracked: e.target.value === '1' })}><option value="0">不管账（仅来源地）</option><option value="1">在本系统管账</option></select>
+        </div>
+        <button className="btn-primary w-full" disabled={!f.code || !f.name} onClick={add}>添加</button>
+      </div>
+    </Modal>
   )
 }
 
@@ -242,32 +279,42 @@ const TR_LABEL: Record<string, [string, string]> = { requested: ['已申请', 'g
 
 function NewTransfer({ master, onClose, onDone }: any) {
   const toast = useToast()
-  const [f, setF] = useState<any>({ from_wh: master.warehouses.find((w: any) => w.kind === 'external')?.id || '', to_wh: master.warehouses.find((w: any) => w.kind === 'main')?.id || '', expected_date: '', note: '', lines: [{ sku_id: '', lot_id: '', qty: '' }] })
+  const firstUntracked = master.warehouses.find((w: any) => !w.tracked && w.active)
+  const [f, setF] = useState<any>({ from_wh: (firstUntracked || master.warehouses.find((w: any) => w.kind === 'external'))?.id || '', to_wh: master.warehouses.find((w: any) => w.kind === 'main')?.id || '', expected_date: '', note: '', shipped_now: !!firstUntracked, lines: [{ sku_id: '', lot_id: '', lot_code: '', qty: '' }] })
+  const src = master.warehouses.find((w: any) => w.id === f.from_wh)
+  const inbound = src && !src.tracked
   const save = async () => {
     try {
-      await post('/api/inv/transfers', { ...f, expected_date: f.expected_date || null, lines: f.lines.filter((l: any) => l.sku_id && l.qty).map((l: any) => ({ sku_id: l.sku_id, lot_id: l.lot_id || null, qty: Number(l.qty) })) })
+      await post('/api/inv/transfers', { ...f, expected_date: f.expected_date || null, lines: f.lines.filter((l: any) => l.sku_id && l.qty).map((l: any) => ({ sku_id: l.sku_id, lot_id: inbound ? null : (l.lot_id || null), lot_code: inbound ? (l.lot_code || null) : null, qty: Number(l.qty) })) })
       onDone(); onClose()
     } catch (e) { toast(errMsg(e), 'err') }
   }
   const setLine = (i: number, p: any) => setF({ ...f, lines: f.lines.map((l: any, j: number) => (i === j ? { ...l, ...p } : l)) })
   return (
-    <Modal open onClose={onClose} title="新建调拨" wide footer={<button className="btn-primary" onClick={save}>{t('common.save')}</button>}>
+    <Modal open onClose={onClose} title={inbound ? `新建调入（来自 ${src.name}）` : '新建调拨'} wide footer={<button className="btn-primary" onClick={save}>{t('common.save')}</button>}>
       <div className="grid gap-3 sm:grid-cols-3">
-        <Field label="来源仓"><select className="input" value={f.from_wh} onChange={(e) => setF({ ...f, from_wh: e.target.value })}>{master.warehouses.map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}</select></Field>
-        <Field label="目的仓"><select className="input" value={f.to_wh} onChange={(e) => setF({ ...f, to_wh: e.target.value })}>{master.warehouses.map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}</select></Field>
+        <Field label="从哪里来"><select className="input" value={f.from_wh} onChange={(e) => { const w = master.warehouses.find((x: any) => x.id === e.target.value); setF({ ...f, from_wh: e.target.value, shipped_now: w && !w.tracked }) }}>
+          {master.warehouses.filter((w: any) => w.active).map((w: any) => <option key={w.id} value={w.id}>{w.name}{w.tracked ? '' : '（来源地）'}</option>)}</select></Field>
+        <Field label="到哪里"><select className="input" value={f.to_wh} onChange={(e) => setF({ ...f, to_wh: e.target.value })}>{master.warehouses.filter((w: any) => w.tracked && w.active).map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}</select></Field>
         <Field label="预计到货"><input type="date" className="input" value={f.expected_date} onChange={(e) => setF({ ...f, expected_date: e.target.value })} /></Field>
       </div>
       <div className="mt-3 space-y-2">
         {f.lines.map((l: any, i: number) => (
           <div key={i} className="grid grid-cols-2 gap-2 rounded-lg border border-slate-100 p-2 sm:grid-cols-[2fr_1.5fr_1fr] sm:border-0 sm:p-0 [&>select:first-child]:col-span-2 sm:[&>select:first-child]:col-span-1">
             <select className="input" value={l.sku_id} onChange={(e) => setLine(i, { sku_id: e.target.value, lot_id: '' })}><option value="">SKU</option>{master.skus.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select>
-            <select className="input" value={l.lot_id} onChange={(e) => setLine(i, { lot_id: e.target.value })}><option value="">(无批次)</option>{master.lots.filter((x: any) => x.sku_id === l.sku_id).map((x: any) => <option key={x.id} value={x.id}>{x.lot_code}</option>)}</select>
-            <input className="input" type="number" placeholder="数量" value={l.qty} onChange={(e) => setLine(i, { qty: e.target.value })} />
+            {inbound
+              ? <label><span className="label sm:hidden">Lot</span><input className="input" placeholder="Lot（按对方单据填写）" value={l.lot_code} onChange={(e) => setLine(i, { lot_code: e.target.value })} /></label>
+              : <select className="input" value={l.lot_id} onChange={(e) => setLine(i, { lot_id: e.target.value })}><option value="">(无批次)</option>{master.lots.filter((x: any) => x.sku_id === l.sku_id).map((x: any) => <option key={x.id} value={x.id}>{x.lot_code}</option>)}</select>}
+            <label><span className="label sm:hidden">数量</span><input className="input" type="number" inputMode="decimal" placeholder="数量" value={l.qty} onChange={(e) => setLine(i, { qty: e.target.value })} /></label>
           </div>
         ))}
-        <button className="btn-ghost btn-sm" onClick={() => setF({ ...f, lines: [...f.lines, { sku_id: '', lot_id: '', qty: '' }] })}><Plus size={14} />加一行</button>
+        <button className="btn-ghost btn-sm" onClick={() => setF({ ...f, lines: [...f.lines, { sku_id: '', lot_id: '', lot_code: '', qty: '' }] })}><Plus size={14} />加一行</button>
       </div>
-      <p className="mt-2 text-xs text-slate-500">调拨申请不改变库存；实际发运才从来源仓扣减并进入在途。</p>
+      <Field label="备注（车次、柜号、BOL 等）"><input className="input" value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} /></Field>
+      <label className="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" checked={f.shipped_now} onChange={(e) => setF({ ...f, shipped_now: e.target.checked })} />对方已经发出：按单据数量直接记为「在途」</label>
+      <p className="mt-2 text-xs text-slate-500">{inbound
+        ? `${src.name} 不在本系统管账：不会检查或扣减那边的库存，只在目的地记在途；到货时现场签收，短少/破损自动生成差异任务。装箱单、BOL、报关单可在调拨单里上传。`
+        : '调拨申请不改变库存；实际发运才从来源仓扣减并进入在途。'}</p>
     </Modal>
   )
 }
@@ -344,7 +391,7 @@ function TransferDetail({ id, onClose, onChanged }: any) {
       </div>
       {mode === 'receive' && <p className="mt-2 text-xs text-slate-500">部分签收保留剩余在途；短缺与损坏自动生成差异任务。重复点击不会重复过账。</p>}
       <div className="mt-5 grid gap-6 md:grid-cols-2">
-        <EvidencePanel title="单据与照片" targetType="transfer" targetId={id} purposes={['BOL', '外库确认', '签收单', '到货照片', '差异照片']} onChange={reload} />
+        <EvidencePanel title="单据与照片" targetType="transfer" targetId={id} purposes={['BOL', '装箱单', '报关单', '外库确认', '签收单', '到货照片', '差异照片']} onChange={reload} />
         <div><div className="mb-2 text-sm font-semibold">沟通记录</div><Timeline targetType="transfer" targetId={id} /></div>
       </div>
     </Modal>
@@ -364,13 +411,14 @@ export function TransfersModule(_: ModProps) {
   return (
     <div>
       <div className="mb-3 flex gap-2">
-        {can('inventory.transfer') && <button className="btn-secondary" onClick={() => setNewOpen(true)}><Plus size={16} />新建调拨</button>}
+        {can('inventory.transfer') && <button className="btn-secondary" onClick={() => setNewOpen(true)}><Plus size={16} />新建调拨 / 调入</button>}
         <ScanButton label="扫调拨单" onResult={scanTransfer} />
       </div>
       <div className="space-y-2">
         {list.data.map((tr: any) => (
           <button key={tr.id} onClick={() => setDetail(tr.id)} className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-slate-200 p-3 text-left text-sm hover:bg-slate-50 active:bg-slate-50">
             <span className="font-mono font-medium">{tr.code}</span>
+            {tr.inbound && <Badge color="purple">调入</Badge>}
             <Badge color={TR_LABEL[tr.status][1]}>{TR_LABEL[tr.status][0]}</Badge>
             <span className="text-slate-500">{tr.from_name} → {tr.to_name}</span>
             <span className="text-xs text-slate-400">{tr.lines.map((l: any) => `${l.sku_code} ×${num(l.qty_requested)}`).join('，')}</span>

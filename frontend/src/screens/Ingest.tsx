@@ -76,7 +76,7 @@ function ChangeSetView({ cs, onDone }: { cs: any; onDone: () => void }) {
     <div className="rounded-lg border p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
         <Badge color={cs.status === 'conflict' ? 'red' : cs.status === 'proposed' ? 'blue' : cs.status === 'rejected' ? 'gray' : 'green'}>{({ proposed: '待确认', applied: '已应用', partial: '部分应用', rejected: '已驳回', conflict: '冲突' } as any)[cs.status]}</Badge>
-        <span>目标 <Link className="text-brand-700 underline" to={cs.target_type === 'task' ? `/t/${cs.target_id}` : `/r/${cs.target_id}`}>{cs.target_title}</Link></span>
+        <span>目标 <Link className="text-brand-700 underline" to={cs.target_type === 'task' ? `/t/${cs.target_id}` : cs.target_type === 'po' ? `/purchasing?po=${cs.target_id}` : `/r/${cs.target_id}`}>{cs.target_title}</Link></span>
         <span className="text-xs text-slate-400">基于 v{cs.target_version}{cs.stale && <b className="text-red-600">（目标已更新到 v{cs.current_version}，应用时会转为冲突）</b>} · {cs.proposed_by} 提出</span>
       </div>
       <div className="space-y-2 sm:hidden">

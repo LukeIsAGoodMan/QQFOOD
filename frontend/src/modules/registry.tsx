@@ -5,6 +5,7 @@ import { Field, useLoad } from '../components/ui'
 import { ChecklistModule } from './checklist'
 import { EvidenceModule, FormModule, IngestModule, KanbanModule, MetricModule, TableModule, TextModule, TimelineModule, type ModProps } from './basic'
 import { LotsModule, ProductionModule, StockModule, TraceModule, TransfersModule } from './inventory'
+import { PurchasingModule, RequisitionsModule } from './purchasing'
 
 type Def = { label: string; group: string; description: string; Render: (p: ModProps) => ReactNode; defaults: () => any; width?: string }
 
@@ -22,6 +23,8 @@ export const MODULES: Record<string, Def> = {
   transfers: { label: '调拨', group: '业务（专用）', description: '申请→发运→在途→签收→差异', Render: TransfersModule, defaults: () => ({}) },
   lots: { label: '批次隔离与放行', group: '业务（专用）', description: '质量状态、电子签名、标签打印', Render: LotsModule, defaults: () => ({}) },
   production: { label: '生产批次', group: '业务（专用）', description: '原料批次投入→成品批次（待放行）', Render: ProductionModule, defaults: () => ({}) },
+  purchasing: { label: '采购单与收货', group: '业务（专用）', description: '审批、下单、按行收货入账、发票与付款核对', Render: PurchasingModule, defaults: () => ({}) },
+  requisitions: { label: '需求与报价对比', group: '业务（专用）', description: '需求版本（余量）、报价对比、生成采购单', Render: RequisitionsModule, defaults: () => ({}) },
   trace: { label: '追溯查询', group: '业务（专用）', description: '正向/反向追溯，导出 CSV', Render: TraceModule, defaults: () => ({}) },
 }
 

@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 
 from ..core import audit, current_user, get_or_404, require
 from ..db import get_db
-from ..models import (BusinessRecord, ChangeSet, EvidenceLink, EvidenceVersion, FieldDefinition, IngestItem, Task,
-                      User)
+from ..models import (BusinessRecord, ChangeSet, EvidenceLink, EvidenceVersion, FieldDefinition, IngestItem, PurchaseOrder,
+                      Task, User)
 from .evidence import create_link, ingest_file, link_out
 from .records import RecordPatch, apply_record_patch
 from .tasks import TaskPatch, apply_task_patch
@@ -21,6 +21,8 @@ from .tasks import TaskPatch, apply_task_patch
 router = APIRouter(prefix="/api", tags=["ingest"])
 
 TASK_FIELDS = {"title": "标题", "description": "说明", "due_at": "截止时间", "next_step": "下一步", "status": "状态"}
+PO_FIELDS = {"expected_date": "预计到货", "note": "备注"}
+MODELS = {"record": BusinessRecord, "task": Task, "po": PurchaseOrder}
 
 
 def _names(db):
@@ -32,7 +34,9 @@ def _target(db: Session, ttype: str, tid: str):
         return get_or_404(db, BusinessRecord, tid, "目标记录不存在")
     if ttype == "task":
         return get_or_404(db, Task, tid, "目标任务不存在")
-    raise HTTPException(400, "v0.1 仅支持对记录或任务提出变更")
+    if ttype == "po":
+        return get_or_404(db, PurchaseOrder, tid, "目标采购单不存在")
+    raise HTTPException(400, "仅支持对记录、任务或采购单提出变更")
 
 
 def _target_label(db, ttype, obj):
@@ -47,7 +51,7 @@ def _current_value(obj, ttype, field):
 
 
 def cs_out(db, c: ChangeSet, names):
-    obj = db.get(BusinessRecord if c.target_type == "record" else Task, c.target_id)
+    obj = db.get(MODELS[c.target_type], c.target_id)
     return {"id": c.id, "target_type": c.target_type, "target_id": c.target_id,
             "target_title": obj.title if obj else "(已删除)", "target_version": c.target_version,
             "current_version": obj.version if obj else None,
@@ -176,6 +180,8 @@ def propose(iid: str, body: ProposeIn, u: User = Depends(current_user), db: Sess
     if body.target_type == "record":
         labels = {f"data.{f.id}": f.label for f in db.query(FieldDefinition).filter_by(record_type_id=obj.record_type_id)}
         labels.update({"title": "标题", "status": "状态"})
+    elif body.target_type == "po":
+        labels = PO_FIELDS
     else:
         labels = TASK_FIELDS
     rows = []
@@ -247,6 +253,9 @@ def apply(cid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
                                 title=next((r["new"] for r in accepted if r["field"] == "title"), None),
                                 status=next((r["new"] for r in accepted if r["field"] == "status"), None))
             apply_record_patch(db, u, obj, patch, via=via)  # raises on evidence-rule / permission failure → nothing applied
+        elif c.target_type == "po":
+            from .purchasing import POPatch, apply_po_patch
+            apply_po_patch(db, u, obj, POPatch(version=obj.version, **{r["field"]: r["new"] for r in accepted}), via=via)
         else:
             kw = {r["field"]: r["new"] for r in accepted}
             if "due_at" in kw and kw["due_at"]:

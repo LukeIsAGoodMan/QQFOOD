@@ -11,36 +11,57 @@ from .db import Base, engine
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 from .agent import oauth as agent_oauth, server as agent_server
-from .routers import auth, evidence, ingest, inventory, metrics, notebook, pages, records, tasks
+from .routers import auth, evidence, ingest, inventory, metrics, notebook, pages, purchasing, records, tasks
 
 def _ensure_columns():
     """Tiny forward-only migration for columns added after v0.1 (create_all does not alter tables)."""
     from sqlalchemy import inspect, text
     insp = inspect(engine)
-    adds = {"users": [("agent_enabled", "BOOLEAN NOT NULL DEFAULT 0")]}
+    adds = {"users": [("agent_enabled", "BOOLEAN NOT NULL DEFAULT 0")],
+            "warehouses": [("tracked", "BOOLEAN NOT NULL DEFAULT 1"), ("active", "BOOLEAN NOT NULL DEFAULT 1")],
+            "purchase_orders": [("doc_type", "VARCHAR(16) NOT NULL DEFAULT 'invoice'"), ("exceptions", "JSON NOT NULL DEFAULT '[]'"),
+                                ("quick", "BOOLEAN NOT NULL DEFAULT 0")]}
     with engine.begin() as conn:
         for table, cols in adds.items():
+            if not insp.has_table(table):
+                continue
             have = {c["name"] for c in insp.get_columns(table)}
             for name, ddl in cols:
                 if name not in have:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
 
 
+def _load_org_mode():
+    from .core import ORG
+    from .db import SessionLocal
+    from .models import AppSetting
+    db = SessionLocal()
+    try:
+        s = db.get(AppSetting, "org")
+        if s and (s.value or {}).get("mode") in ("simple", "standard"):
+            ORG["mode"] = s.value["mode"]
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(_app):
     Base.metadata.create_all(engine)
     _ensure_columns()
-    from .seed import seed_if_empty
+    from .seed import seed_if_empty, upgrade_pages, upgrade_sources
     seed_if_empty()
+    upgrade_pages()
+    upgrade_sources()
+    _load_org_mode()
     yield
 
 
-app = FastAPI(title="QQ Food 597 运营管理系统", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="QQ Food 597 运营管理系统", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
-for r in (auth, pages, records, tasks, evidence, inventory, notebook, ingest, metrics, agent_oauth, agent_server):
+for r in (auth, pages, records, tasks, evidence, inventory, purchasing, notebook, ingest, metrics, agent_oauth, agent_server):
     app.include_router(r.router)
 
 
