@@ -650,3 +650,22 @@ class Receipt(Base):
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     posting_id: Mapped[str | None] = mapped_column(String(32))
     signature_meaning: Mapped[str] = mapped_column(String(200), default="")
+
+
+# ---------- Batch proposals (ChatGPT / manual bulk import, confirmed by a human) ----------
+class BatchProposal(Base):
+    """批量提议：SKU 主档、期初/盘点数量、加拿大调入。提交时不改任何数据；人在工作台逐行勾选确认后才应用。"""
+    __tablename__ = "batch_proposals"
+    id: Mapped[str] = _id("bt")
+    code: Mapped[str] = mapped_column(String(40), unique=True)
+    kind: Mapped[str] = mapped_column(String(20))  # sku_upsert | stock_count | inbound
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    rows: Mapped[list] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="proposed")  # proposed applied partial rejected
+    source: Mapped[str] = mapped_column(String(40), default="manual")  # manual | agent:ChatGPT
+    source_note: Mapped[str] = mapped_column(Text, default="")
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = TS()
+    decided_by: Mapped[str | None] = mapped_column(String(32))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -390,6 +390,42 @@ let exceptionTaskId
   await admin.context().close()
 }
 
+// ---------- 10. ChatGPT 批量导入：SKU 与期初数量 → 老板在手机上逐行确认 ----------
+{
+  const page = await login('boss')
+  const crypto = await import('node:crypto')
+  const req = page.context().request
+  await page.evaluate(async () => fetch('/api/agent/enable', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: JSON.stringify({ enabled: true }) }))
+  const redirect = 'http://127.0.0.1:9/oauth-callback'
+  const reg = await (await req.post(`${BASE}/oauth/register`, { data: { client_name: 'ChatGPT', redirect_uris: [redirect] } })).json()
+  const verifier = crypto.randomBytes(32).toString('base64url')
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url')
+  const auth = await req.post(`${BASE}/oauth/authorize`, { form: { response_type: 'code', client_id: reg.client_id, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', username: 'boss', password: 'qq597demo', scope_write: 'on' }, maxRedirects: 0 })
+  const code = new URL(auth.headers()['location']).searchParams.get('code')
+  const tok = await (await req.post(`${BASE}/oauth/token`, { form: { grant_type: 'authorization_code', code, redirect_uri: redirect, code_verifier: verifier, client_id: reg.client_id } })).json()
+  const mcp = async (name, args) => (await (await req.post(`${BASE}/mcp`, { headers: { Authorization: `Bearer ${tok.access_token}` }, data: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } })).json()).result.structuredContent
+  const skus = await mcp('propose_skus', { source_summary: '我和 ChatGPT 做的库存表', rows: [
+    { code: 'TT-DUMP-PORK', name: '猪肉白菜水饺 1kg', category: '成品', base_unit: '箱', conversions: { '袋': 12 }, safety_stock: { WH597: 30 } },
+    { code: 'TT-DUMP-VEG', name: '素三鲜水饺 1kg', category: '成品', base_unit: '箱', conversions: { '袋': 12 } },
+    { code: 'DUP-1', name: '示例 香料包' }] })
+  ok('ChatGPT 提交 SKU 批次（含疑似重复）', skus.summary.new === 2 && skus.summary.duplicate === 1, JSON.stringify(skus.summary))
+  await page.goto(skus.confirm_url.replace(/^https?:\/\/[^/]+/, BASE)); await page.waitForTimeout(1200)
+  await checkLayout(page, '批量确认（SKU）')
+  await shot(page, 'bat-01-skus')
+  ok('疑似重复默认不勾选', !(await page.locator('label:has-text("DUP-1") input[type=checkbox]').isChecked()))
+  await page.locator('button', { hasText: '确认所选' }).tap(); await page.waitForTimeout(900)
+  const counts = await mcp('propose_stock_counts', { source_summary: '11/5 实盘', rows: [
+    { sku_code: 'TT-DUMP-PORK', lot_code: 'P1105', qty: 48 }, { sku_code: 'TT-DUMP-VEG', qty: 36, unit: '袋' }] })
+  await page.goto(counts.confirm_url.replace(/^https?:\/\/[^/]+/, BASE)); await page.waitForTimeout(1200)
+  await checkLayout(page, '批量确认（期初数量）')
+  await shot(page, 'bat-02-stock')
+  await page.locator('button', { hasText: '确认所选' }).tap(); await page.waitForTimeout(900)
+  const rows = (await api(page, '/api/inv/stock')).rows
+  const pork = rows.find((r) => r.sku_code === 'TT-DUMP-PORK'), veg = rows.find((r) => r.sku_code === 'TT-DUMP-VEG')
+  ok('确认后库存写入（36 袋 = 3 箱）', pork?.on_hand === 48 && veg?.on_hand === 3, `猪肉 ${pork?.on_hand} / 素三鲜 ${veg?.on_hand}`)
+  await page.context().close()
+}
+
 await browser.close()
 const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} 通过；页面脚本错误 ${pageErrors.length} 个；截图在 e2e/screenshots/`)

@@ -24,7 +24,7 @@ DEFS = {
     "quarantined_lots": ("隔离/待放行批次", "质量状态为隔离或待放行的批次数", "/quality"),
     "below_safety": ("低于安全库存", "可用量（实物−隔离−预留）低于该仓安全库存的 SKU×仓库 数", "/inventory"),
     "unverified_evidence": ("待核验证据", "有效关联中核验状态为「未核验」的数量", "/evidence-review"),
-    "pending_ingest": ("资料待处理", "资料中心中待整理/待确认/冲突的条目数", "/ingest"),
+    "pending_ingest": ("资料待处理", "资料中心中待整理/待确认/冲突的条目，加上待确认的批量导入", "/ingest"),
     "in_transit": ("在途调拨", "已发运未完全签收的调拨单数", "/inventory"),
     "po_pending_approval": ("待审批采购", "金额超过审批额度、等待老板签批的采购单数（含补录采购的事后审批）", "/purchasing"),
     "po_overdue": ("到货逾期", "已下单或部分到货、预计到货日早于今天（场地时区）的采购单数", "/purchasing"),
@@ -75,7 +75,9 @@ def compute(db: Session, u: User, key: str) -> dict:
         value = db.query(EvidenceLink).filter_by(active=True, verify_status="unverified").filter(
             EvidenceLink.target_type.notin_(["ingest"])).count()
     elif key == "pending_ingest":
-        value = db.query(IngestItem).filter(IngestItem.status.in_(["inbox", "pending_confirm", "conflict"])).count()
+        from ..models import BatchProposal
+        value = db.query(IngestItem).filter(IngestItem.status.in_(["inbox", "pending_confirm", "conflict"])).count() \
+            + db.query(BatchProposal).filter_by(status="proposed").count()
     elif key == "in_transit":
         value = db.query(Transfer).filter(Transfer.status.in_(["shipped", "partial"])).count()
     elif key in ("po_pending_approval", "po_overdue", "receipts_pending"):
