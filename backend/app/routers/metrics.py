@@ -29,6 +29,9 @@ DEFS = {
     "po_pending_approval": ("待审批采购", "金额超过审批额度、等待老板签批的采购单数（含补录采购的事后审批）", "/purchasing"),
     "po_overdue": ("到货逾期", "已下单或部分到货、预计到货日早于今天（场地时区）的采购单数", "/purchasing"),
     "receipts_pending": ("收货待入账", "现场已提交、尚未由仓管签名入账的收货单数", "/purchasing"),
+    "orders_due_soon": ("今明两天要交的订单", "未发完、要求交货日期为今天或明天（场地时区）的客户订单数", "/orders"),
+    "orders_overdue": ("订单已过交期", "未发完、要求交货日期早于今天的客户订单数（客户可能拒收）", "/orders"),
+    "orders_short": ("订单库存不够发", "未发完的订单中，至少一行可用库存不足以发完剩余数量的订单数", "/orders"),
     "missing_checklists": ("今日应填未提交", "已发布页面中设为每日必填、今天（场地时区）尚无提交的检查表数", "/tasks"),
 }
 
@@ -92,6 +95,15 @@ def compute(db: Session, u: User, key: str) -> dict:
                                                    PurchaseOrder.expected_date < today).count()
         else:
             value = db.query(Receipt).filter_by(status="submitted").count()
+    elif key in ("orders_due_soon", "orders_overdue", "orders_short"):
+        from ..models import SalesOrder
+        from .orders import OPEN as ORDER_OPEN, order_out
+        open_orders = db.query(SalesOrder).filter(SalesOrder.status.in_(ORDER_OPEN)).all()
+        if key == "orders_short":
+            value = sum(1 for so in open_orders if order_out(db, so, u)["short_lines"] > 0)
+        else:
+            flag = "due_soon" if key == "orders_due_soon" else "overdue"
+            value = sum(1 for so in open_orders if order_out(db, so, u, detail=False)[flag])
     elif key == "missing_checklists":
         start = _site_today_start(db)
         required, missing = 0, []

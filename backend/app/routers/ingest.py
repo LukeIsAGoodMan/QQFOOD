@@ -22,6 +22,14 @@ router = APIRouter(prefix="/api", tags=["ingest"])
 
 TASK_FIELDS = {"title": "标题", "description": "说明", "due_at": "截止时间", "next_step": "下一步", "status": "状态"}
 PO_FIELDS = {"expected_date": "预计到货", "note": "备注"}
+SO_FIELDS = {"required_date": "要求交货日期", "note": "备注"}
+
+
+def _so_model():
+    from ..models import SalesOrder
+    return SalesOrder
+
+
 MODELS = {"record": BusinessRecord, "task": Task, "po": PurchaseOrder}
 
 
@@ -36,6 +44,8 @@ def _target(db: Session, ttype: str, tid: str):
         return get_or_404(db, Task, tid, "目标任务不存在")
     if ttype == "po":
         return get_or_404(db, PurchaseOrder, tid, "目标采购单不存在")
+    if ttype == "so":
+        return get_or_404(db, _so_model(), tid, "目标订单不存在")
     raise HTTPException(400, "仅支持对记录、任务或采购单提出变更")
 
 
@@ -51,7 +61,7 @@ def _current_value(obj, ttype, field):
 
 
 def cs_out(db, c: ChangeSet, names):
-    obj = db.get(MODELS[c.target_type], c.target_id)
+    obj = db.get(MODELS.get(c.target_type) or _so_model(), c.target_id)
     return {"id": c.id, "target_type": c.target_type, "target_id": c.target_id,
             "target_title": obj.title if obj else "(已删除)", "target_version": c.target_version,
             "current_version": obj.version if obj else None,
@@ -182,6 +192,8 @@ def propose(iid: str, body: ProposeIn, u: User = Depends(current_user), db: Sess
         labels.update({"title": "标题", "status": "状态"})
     elif body.target_type == "po":
         labels = PO_FIELDS
+    elif body.target_type == "so":
+        labels = SO_FIELDS
     else:
         labels = TASK_FIELDS
     rows = []
@@ -253,6 +265,9 @@ def apply(cid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
                                 title=next((r["new"] for r in accepted if r["field"] == "title"), None),
                                 status=next((r["new"] for r in accepted if r["field"] == "status"), None))
             apply_record_patch(db, u, obj, patch, via=via)  # raises on evidence-rule / permission failure → nothing applied
+        elif c.target_type == "so":
+            from .orders import OrderPatch, apply_order_patch
+            apply_order_patch(db, u, obj, OrderPatch(version=obj.version, **{r["field"]: r["new"] for r in accepted}), via=via)
         elif c.target_type == "po":
             from .purchasing import POPatch, apply_po_patch
             apply_po_patch(db, u, obj, POPatch(version=obj.version, **{r["field"]: r["new"] for r in accepted}), via=via)

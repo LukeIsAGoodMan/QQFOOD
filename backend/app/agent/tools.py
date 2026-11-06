@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..core import FILE_SIGN_KEY, ROLES
 from ..models import BusinessRecord, FieldDefinition, IngestItem, Lot, Sku, Task, User, Warehouse
 from ..routers import evidence as ev_r, ingest as ing_r, inventory as inv_r, metrics as met_r, notebook as nb_r
-from ..routers import batches as bat_r, purchasing as pur_r, records as rec_r, tasks as task_r
+from ..routers import batches as bat_r, orders as ord_r, purchasing as pur_r, records as rec_r, tasks as task_r
 from ..routers.auth import search as global_search
 
 TOOLS: dict[str, dict] = {}
@@ -365,7 +365,7 @@ TASK_FIELD_ALIASES = {"due_at": "due_at", "截止时间": "due_at", "截止": "d
 
 @tool("propose_change", "提出待确认变更",
       "根据用户提供的信息（如聊天截图、单据照片的内容）对某条记录或任务提出字段修改。不会直接生效：进入资料中心，由用户在系统中逐项确认。field 可用字段中文名（list_record_types/get_record 可查）。",
-      {"target_type": {"type": "string", "enum": ["record", "task", "po"]}, "target_id": {"type": "string", "description": "记录/任务 id，或采购单 id"},
+      {"target_type": {"type": "string", "enum": ["record", "task", "po", "so"]}, "target_id": {"type": "string", "description": "记录/任务 id、采购单 id，或客户订单 id/订单号"},
        "changes": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "object", "properties": {
            "field": {"type": "string"}, "new_value": {"type": ["string", "number", "boolean"]}, "reason": {"type": "string"}},
            "required": ["field", "new_value"], "additionalProperties": False}},
@@ -388,6 +388,14 @@ def propose_change(ctx, db, target_type, target_id, changes, source_summary):
         target_id = obj.id
         fmap = {"expected_date": "expected_date", "预计到货": "expected_date", "交期": "expected_date", "到货日期": "expected_date",
                 "note": "note", "备注": "note"}
+    elif target_type == "so":
+        from ..models import SalesOrder
+        obj = db.get(SalesOrder, target_id) or db.query(SalesOrder).filter_by(code=target_id.strip().upper()).first()
+        if not obj:
+            raise ToolError("客户订单不存在")
+        target_id = obj.id
+        fmap = {"required_date": "required_date", "要求交货日期": "required_date", "交货日期": "required_date", "交期": "required_date",
+                "note": "note", "备注": "note"}
     else:
         obj = db.get(Task, target_id)
         if not obj:
@@ -401,7 +409,7 @@ def propose_change(ctx, db, target_type, target_id, changes, source_summary):
         val = ch.get("new_value")
         if key == "due_at" and isinstance(val, str):
             val = _to_dt(val)
-        if key == "expected_date":
+        if key in ("expected_date", "required_date"):
             val = str(val)[:10]
             try:
                 datetime.fromisoformat(val)
@@ -421,7 +429,7 @@ def propose_change(ctx, db, target_type, target_id, changes, source_summary):
     return {"status": "pending_confirmation", "message": "已提交为待确认变更，尚未生效。请用户打开链接逐项确认。",
             "changes": [{"field": c["label"], "old": c["old"], "new": c["new"]} for c in cs["changes"]],
             "confirm_url": _link(ctx, "ingest", it.id),
-            "target_url": ctx.link(f"/purchasing?po={target_id}") if target_type == "po" else _link(ctx, target_type, target_id)}
+            "target_url": ctx.link(f"/purchasing?po={target_id}") if target_type == "po" else ctx.link(f"/orders?so={target_id}") if target_type == "so" else _link(ctx, target_type, target_id)}
 
 
 # ---------- original-file upload link ----------
@@ -447,11 +455,12 @@ def verify_upload(token: str) -> dict:
 
 
 @tool("request_upload_link", "生成原件上传链接", "生成一个 30 分钟有效的手机上传链接，让用户把照片/PDF 原件直接上传到指定任务、记录或调拨单（作为证据，待核验）。",
-      {"target_type": {"type": "string", "enum": ["task", "record", "transfer", "po"]}, "target_id": {"type": "string"},
+      {"target_type": {"type": "string", "enum": ["task", "record", "transfer", "po", "so"]}, "target_id": {"type": "string"},
        "purpose": {"type": "string", "description": "用途，如 签收单、安装后照片、发票、付款证明、整改证明"}}, ["target_type", "target_id"], tier="write")
 def request_upload_link(ctx, db, target_type, target_id, purpose="附件"):
     from ..models import PurchaseOrder
-    exists = {"task": Task, "record": BusinessRecord, "po": PurchaseOrder}.get(target_type)
+    from ..models import SalesOrder
+    exists = {"task": Task, "record": BusinessRecord, "po": PurchaseOrder, "so": SalesOrder}.get(target_type)
     if exists and not db.get(exists, target_id):
         raise ToolError("目标不存在")
     if target_type == "transfer":
@@ -495,7 +504,8 @@ def _batch_reply(ctx, b, db):
 
 
 @tool("propose_skus", "批量提交 SKU", "批量新增或修改商品主档。rows 每行：code（编码，必填）、name、category（原料/包材/成品/耗材）、base_unit（基本单位，如 箱）、"
-      "conversions（{单位: 每个基本单位等于多少}，如 {\"磅\": 20}）、barcode、safety_stock（{仓库编码: 数量}）。不会直接生效。",
+      "conversions（{单位: 每个基本单位等于多少}，如 {\"磅\": 20}）、barcode、safety_stock（{仓库编码: 数量}）、"
+      "purchase_pack（供应商每箱多少基本单位，如鸡腿肉 40）、ship_pack（出货每箱目标量，如鸡丁 50）。称重品（肉、切粒）基本单位用“磅”。不会直接生效。",
       {"rows": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},
        "source_summary": {"type": "string", "description": "数据来源说明，如 “根据 11/3 库存表 v4 与邮件确认”"}},
       ["rows", "source_summary"], tier="propose")
@@ -529,3 +539,79 @@ def propose_inbound(ctx, db, from_code, lines, source_summary, to_code="WH597", 
                                                         source_note=source_summary), source=f"agent:{ctx.client}")
     db.commit()
     return _batch_reply(ctx, b, db)
+
+
+# ---------- customer orders (大统华 PO 等) ----------
+@tool("list_customers", "客户与品项对照", "列出客户（如大统华 TNT）、送货点（门店/中央厨房）和已记住的品项对照（客户 Item#/品名 → 我们的 SKU 与换算）。录订单前可先看。",
+      {"customer": {"type": "string", "description": "可选：客户名或编码"}})
+def list_customers(ctx, db, customer=None):
+    rows = ord_r.customers(ctx.user, db)
+    if customer:
+        c = ord_r.find_customer(db, customer)
+        rows = [r for r in rows if c and r["id"] == c.id]
+    return {"customers": [{**{k: r[k] for k in ("code", "name", "vendor_no", "invoice_email")},
+                           "sites": [{k: s[k] for k in ("name", "store_no", "address", "dept", "contact")} for s in r["sites"]],
+                           "items": [{k: i[k] for k in ("item_no", "description", "pack_size", "order_unit", "sku_code", "factor", "last_price")} for i in r["items"]]}
+                          for r in rows]}
+
+
+@tool("propose_order", "录入客户订单（PO）", "把一张客户 PO（大统华 PO 的 PDF/照片/邮件）录成待确认订单。一张 PO 调用一次；一个 PDF 里有多张 PO（如 General、Freezer）就分别调用。"
+      "meta：customer（默认大统华）、site（送货点，如 Chino Hills Kitchen Deli）、po_no、po_date、required_date（Delivery Date / Date Required，YYYY-MM-DD）、category（General/Freezer/中央厨房）。"
+      "lines 每行：item_no（客户 Item#，有就填）、description（用英文品名；PDF 里乱码的中文行忽略）、pack_size、unit（case=箱，lb=磅）、qty、price（单价）、sku_code（如能判断我们对应的 SKU）。"
+      "不会直接生效：返回 confirm_url 给用户确认，以及 upload_url 让用户上传 PO 原件。",
+      {"customer": {"type": "string"}, "site": {"type": "string"}, "po_no": {"type": "string"}, "po_date": {"type": "string"},
+       "required_date": {"type": "string"}, "category": {"type": "string"}, "note": {"type": "string"},
+       "lines": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "object"}},
+       "source_summary": {"type": "string", "description": "来源，如 “11/5 邮件 PO 623030105 PDF 第 1 页”"}},
+      ["po_no", "lines", "source_summary"], tier="propose")
+def propose_order(ctx, db, po_no, lines, source_summary, customer=None, site=None, po_date=None, required_date=None, category="", note=""):
+    meta = {"customer": customer or "TNT", "site": site, "po_no": po_no, "po_date": (po_date or "")[:10] or None,
+            "required_date": (required_date or "")[:10] or None, "category": category, "note": note}
+    b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="order", rows=lines, meta=meta, source_note=source_summary), source=f"agent:{ctx.client}")
+    db.commit()
+    out = _batch_reply(ctx, b, db)
+    out["upload_url"] = ctx.link(f"/u/{sign_upload(ctx.user.id, 'batch', b.id, 'PO 原件')}")
+    out["message"] += " 请同时用 upload_url 上传 PO 原件（PDF/照片），确认后会自动挂到订单上。"
+    return out
+
+
+@tool("list_orders", "客户订单列表", "列出客户订单：PO 号、送货点、要求交货日期、状态（待发货/部分发货/已发货/已送达）、是否逾期或明天到期、金额、未配对行数。",
+      {"open_only": {"type": "boolean", "description": "只看未发完的（默认 true）"}, "status": {"type": "string"}})
+def list_orders(ctx, db, open_only=True, status=None):
+    rows = ord_r.list_orders(status, open_only and not status, ctx.user, db)
+    return {"count": len(rows), "orders": [{k: r[k] for k in ("code", "po_no", "customer", "site", "required_date", "status_label", "overdue",
+                                                              "due_soon", "total", "shipped_amount", "unmapped")} | {"url": ctx.link(f"/orders?so={r['id']}")}
+                                           for r in rows[:50]]}
+
+
+@tool("get_order", "客户订单详情", "按订单号（SO-…）或 PO 号查看订单：每行订量、已发、拒收、剩余、对应 SKU、可用库存是否够、称重箱、发货与签收记录。",
+      {"order": {"type": "string"}}, ["order"])
+def get_order(ctx, db, order):
+    from ..models import SalesOrder
+    so = (db.get(SalesOrder, order) or db.query(SalesOrder).filter_by(code=order.strip().upper()).first()
+          or db.query(SalesOrder).filter_by(po_no=order.strip()).order_by(SalesOrder.created_at.desc()).first())
+    if not so:
+        raise ToolError(f"找不到订单 {order}")
+    d = ord_r.order_out(db, so, ctx.user)
+    d.pop("can", None)
+    for l in d["lines"]:
+        l.pop("lots", None)
+        if "boxes_in_stock" in l:
+            l["boxes_in_stock"] = {"count": len(l["boxes_in_stock"]), "total_weight": round(sum(b["weight"] for b in l["boxes_in_stock"]), 2)}
+    d["url"] = ctx.link(f"/orders?so={so.id}")
+    d["note_for_ai"] = "发货、送达登记需要在工作台完成（称重扫箱、签收单）。改交期可用 propose_change(target_type='so')。"
+    return d
+
+
+@tool("get_production_plan", "备料与生产计划", "按未发完的客户订单计算：每个成品要生产多少（扣掉成品库存）、按出成率需要多少原料、原料缺多少、"
+      "按供应商箱规建议买几箱（例：300 lb 鸡丁、出成率 95%、鸡腿肉 40 lb/箱 → 8 箱 320 lb），以及预计剩余（作损耗）。")
+def get_production_plan(ctx, db):
+    from ..routers import production as prod_r
+    d = prod_r.plan(None, ctx.user, db)
+    return {"outputs": [{"sku": o["sku"]["code"], "name": o["sku"]["name"], "demand": o["demand"], "finished_available": o["finished_available"],
+                         "to_make": o["to_make"], "boxes_suggested": o["boxes_suggested"], "ship_pack": o["sku"]["ship_pack"], "has_recipe": o["has_recipe"],
+                         "orders": o["orders"], "inputs": o["inputs"]} for o in d["outputs"]],
+            "materials": [{"sku": m["sku"]["code"], "name": m["sku"]["name"], "need": m["need"], "available": m["available"], "short": m["short"],
+                           "purchase_pack": m["sku"]["purchase_pack"], "suggest_cases": m["suggest_cases"], "suggest_qty": m["suggest_qty"],
+                           "expected_leftover": m["expected_leftover"]} for m in d["materials"]],
+            "url": ctx.link("/production"), "note": "配方/出成率与箱规在工作台「生产」页设置；生成采购单草稿也在那里一键完成。"}

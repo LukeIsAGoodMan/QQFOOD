@@ -23,8 +23,8 @@ router = APIRouter(prefix="/api/batches", tags=["batches"])
 
 SITE_TZ = ZoneInfo("America/Los_Angeles")
 SKU_CATEGORIES = ["原料", "包材", "成品", "耗材"]
-KIND_LABEL = {"sku_upsert": "商品主档", "stock_count": "期初 / 盘点数量", "inbound": "公司调入"}
-KIND_PERM = {"sku_upsert": "inventory.master", "stock_count": "inventory.post", "inbound": "inventory.transfer"}
+KIND_LABEL = {"sku_upsert": "商品主档", "stock_count": "期初 / 盘点数量", "inbound": "公司调入", "order": "客户订单（PO）"}
+KIND_PERM = {"sku_upsert": "inventory.master", "stock_count": "inventory.post", "inbound": "inventory.transfer", "order": "order.manage"}
 MAX_ROWS = 300
 
 
@@ -68,7 +68,9 @@ def _analyze_sku(db: Session, rows: list[dict]):
         cur = skus.get(code)
         if cur:
             want = {"name": r.get("name") or cur.name, "category": cat, "base_unit": r.get("base_unit") or cur.base_unit,
-                    "conversions": {**(cur.conversions or {}), **conv}, "barcode": r.get("barcode") if r.get("barcode") is not None else cur.barcode}
+                    "conversions": {**(cur.conversions or {}), **conv}, "barcode": r.get("barcode") if r.get("barcode") is not None else cur.barcode,
+                    "purchase_pack": r.get("purchase_pack") if r.get("purchase_pack") is not None else cur.purchase_pack,
+                    "ship_pack": r.get("ship_pack") if r.get("ship_pack") is not None else cur.ship_pack}
             for k, v in want.items():
                 if getattr(cur, k) != v:
                     res["changes"][k] = [getattr(cur, k), v]
@@ -92,7 +94,8 @@ def _analyze_sku(db: Session, rows: list[dict]):
             if twin:
                 res["messages"].append(f"疑似与已有 {twin.code} {twin.name} 重复（默认不勾选）")
             res["changes"] = {k: [None, v] for k, v in {"name": r.get("name"), "category": cat, "base_unit": r.get("base_unit") or "箱",
-                                                         "conversions": conv, "barcode": r.get("barcode")}.items() if v not in (None, {}, "")}
+                                                         "conversions": conv, "barcode": r.get("barcode"), "purchase_pack": r.get("purchase_pack"),
+                                                         "ship_pack": r.get("ship_pack")}.items() if v not in (None, {}, "")}
             for wc, q in (r.get("safety_stock") or {}).items():
                 res["changes"][f"安全库存@{str(wc).upper()}"] = [None, q]
         out.append(res)
@@ -191,7 +194,78 @@ def _analyze_inbound(db: Session, meta: dict, rows: list[dict]):
     return out, src, dst
 
 
+def _analyze_order(db: Session, meta: dict, rows: list[dict]):
+    from . import orders as o
+    cust = o.find_customer(db, meta.get("customer"))
+    header, warn = [], []
+    site = None
+    if not cust:
+        header.append(f"客户「{meta.get('customer')}」未登记")
+    else:
+        site = o.find_site(db, cust, meta.get("site"))
+        if not site:
+            header.append(f"送货点「{meta.get('site') or '未填'}」未登记，请先在订单页的客户资料里添加")
+    po = str(meta.get("po_no") or "").strip()
+    if not po:
+        header.append("缺少 PO 号")
+    if cust and po:
+        dup = o.duplicate_of(db, cust.id, po, meta.get("po_date"), site.id if site else None)
+        if dup:
+            header.append(f"这张 PO 已录入：{dup.code}（不会重复建单）")
+    if not meta.get("required_date"):
+        warn.append("PO 上没有交货日期")
+    skus = {s.code: s for s in db.query(Sku)}
+    wh = db.query(Warehouse).filter_by(kind="main").first()
+    out = []
+    for r in rows:
+        unit = o.norm_unit(r.get("unit"))
+        res = {"key": f"{r.get('item_no') or ''} {r.get('description') or ''}".strip(), "action": "error", "messages": list(header), "changes": {}}
+        try:
+            qty, price = float(r.get("qty")), float(r.get("price") or 0)
+            if qty <= 0 or price < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            res["messages"].append("数量需大于 0、单价不为负")
+            qty = price = None
+        if not r.get("description"):
+            res["messages"].append("缺少品名")
+        if res["messages"]:
+            out.append(res)
+            continue
+        res["messages"] += warn
+        ci = o.match_item(db, cust.id, r.get("item_no"), r.get("description"))
+        sku, factor = None, None
+        if ci:
+            sku, factor = db.get(Sku, ci.sku_id), ci.factor
+            res["action"] = "mapped"
+            if ci.last_price is not None and abs(ci.last_price - price) > 1e-6:
+                res["messages"].append(f"单价与上次不同：上次 {ci.last_price}，这次 {price}")
+        elif r.get("sku_code") and str(r["sku_code"]).strip().upper() in skus:
+            sku = skus[str(r["sku_code"]).strip().upper()]
+            factor = r.get("factor") or o.default_factor(sku, unit)
+            if not factor:
+                res["messages"].append(f"{sku.code} 没有「{unit}」换算：确认时请填每{unit}等于多少{sku.base_unit}")
+            res["action"] = "new"
+            res["messages"].append("首次配对：确认后记住，下次自动对上")
+        else:
+            res["action"] = "unmapped"
+            res["messages"].append("还没对上我们的 SKU：可在这里选，或确认后在订单里补")
+        res["changes"] = {"数量": [None, f"{qty:g} {unit}"], "单价": [None, price], "金额": [None, round(qty * price, 2)]}
+        if sku:
+            res["changes"]["SKU"] = [None, f"{sku.code} {sku.name}" + (f"（×{factor:g}）" if factor and factor != 1 else "")]
+            res.update({"sku_id": sku.id, "factor": factor})
+            if wh and factor:
+                from .orders import available_base
+                avail = available_base(db, sku.id, wh.id)
+                if avail + 1e-9 < qty * factor:
+                    res["messages"].append(f"库存不足：可用 {round(avail, 2)} {sku.base_unit}，需要 {round(qty * factor, 2)}")
+        out.append(res)
+    return out, cust, site
+
+
 def analyze(db: Session, b: BatchProposal):
+    if b.kind == "order":
+        return _analyze_order(db, b.meta, b.rows)[0]
     if b.kind == "sku_upsert":
         return _analyze_sku(db, b.rows)
     if b.kind == "stock_count":
@@ -269,6 +343,7 @@ def get_batch(bid: str, u: User = Depends(current_user), db: Session = Depends(g
 class ApplyIn(BaseModel):
     selected: list[int]
     note: str = ""
+    overrides: dict = {}  # 订单：{行号: {sku_id, factor}}，用于在确认页给未配对的行选 SKU
 
 
 @router.post("/{bid}/apply")
@@ -290,15 +365,19 @@ def apply(bid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
             code = a["key"]
             sku = db.query(Sku).filter_by(code=code).first()
             if not sku:
-                sku = Sku(code=code, name=r["name"], category=r.get("category") or "原料", base_unit=r.get("base_unit") or "箱",
-                          conversions=r.get("conversions") or {}, barcode=r.get("barcode"))
+                bu = r.get("base_unit") or "箱"
+                sku = Sku(code=code, name=r["name"], category=r.get("category") or "原料", base_unit=bu,
+                          conversions=r.get("conversions") or {}, barcode=r.get("barcode"), purchase_pack=r.get("purchase_pack"),
+                          ship_pack=r.get("ship_pack"), catch_weight=bu in ("磅", "lb"))
                 db.add(sku)
                 db.flush()
             else:
                 ch = a["changes"]
-                for k in ("name", "category", "base_unit", "conversions", "barcode"):
+                for k in ("name", "category", "base_unit", "conversions", "barcode", "purchase_pack", "ship_pack"):
                     if k in ch:
                         setattr(sku, k, ch[k][1])
+                if sku.base_unit in ("磅", "lb"):
+                    sku.catch_weight = True
             for wc, q in (r.get("safety_stock") or {}).items():
                 w = whs[str(wc).upper()]
                 ss = db.query(SafetyStock).filter_by(sku_id=sku.id, warehouse_id=w.id).first()
@@ -331,6 +410,32 @@ def apply(bid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
             else:
                 txn(db, p, sku.id, w.id, "unverified", a["qty_base"] - unv, lot_id)
             applied.append(i)
+    elif b.kind == "order":
+        from .orders import OLineIn, OrderIn, create_order
+        from ..models import EvidenceLink, EvidenceVersion
+        from .evidence import create_link
+        _, cust, site = _analyze_order(db, b.meta, b.rows)
+        lines = []
+        for i in chosen:
+            a, r = an[i], b.rows[i]
+            if a["action"] not in ("mapped", "new", "unmapped"):
+                skipped.append(i)
+                continue
+            ov = body.overrides.get(str(i)) or body.overrides.get(i) or {}
+            sku_id = ov.get("sku_id") or a.get("sku_id")
+            factor = ov.get("factor") or a.get("factor")
+            lines.append(OLineIn(item_no=str(r.get("item_no") or ""), description=r["description"], pack_size=str(r.get("pack_size") or ""),
+                                 unit=r.get("unit") or "箱", qty=float(r["qty"]), price=float(r.get("price") or 0), sku_id=sku_id,
+                                 factor=float(factor) if factor else None))
+            applied.append(i)
+        if not lines:
+            raise HTTPException(400, "没有可确认的行")
+        so = create_order(db, u, OrderIn(customer_id=cust.id, site_id=site.id if site else None, po_no=str(b.meta["po_no"]).strip(),
+                                         po_date=b.meta.get("po_date"), required_date=b.meta.get("required_date"),
+                                         category=b.meta.get("category") or "", note=b.meta.get("note") or "", lines=lines), source=b.source)
+        for l in db.query(EvidenceLink).filter_by(target_type="batch", target_id=b.id, active=True):
+            create_link(db, u, db.get(EvidenceVersion, l.evidence_version_id), "so", so.id, l.purpose)
+        b.result = {**(b.result or {}), "order_id": so.id, "order_code": so.code}
     else:  # inbound → one transfer with the chosen lines
         lines = []
         skus = {s.code: s for s in db.query(Sku)}

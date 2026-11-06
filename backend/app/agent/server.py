@@ -198,7 +198,8 @@ _uploads: dict[str, int] = defaultdict(int)
 
 
 def _target_title(db, d):
-    model = {"task": Task, "record": BusinessRecord, "transfer": Transfer, "po": PurchaseOrder}[d["t"]]
+    from ..models import BatchProposal, SalesOrder
+    model = {"task": Task, "record": BusinessRecord, "transfer": Transfer, "po": PurchaseOrder, "batch": BatchProposal, "so": SalesOrder}[d["t"]]
     obj = db.get(model, d["i"])
     if not obj:
         raise HTTPException(404, "目标不存在")

@@ -8,7 +8,7 @@ from .core import hash_secret, encrypt_secret
 from .db import SessionLocal
 from .models import (AccountEntry, Contact, FieldDefinition, NotebookNote, Page, PageVersion, RecordType, SafetyStock,
                      Site, Sku, Task, Transfer, TransferLine, User, Warehouse, BusinessRecord, Lot, AppSetting, POLine, PurchaseOrder,
-                     Quote, Requisition, RequisitionVersion, gid)
+                     Quote, Requisition, RequisitionVersion, Customer, CustomerSite, gid)
 from .routers.pages import normalize_layout
 
 DEMO_PASSWORD = os.environ.get("QQ_DEMO_PASSWORD", "qq597demo")
@@ -36,6 +36,70 @@ def PROCUREMENT_MODULES():
     ]
 
 
+def ORDERS_MODULES():
+    return [
+        m("metric", "", "third", metric="orders_due_soon"), m("metric", "", "third", metric="orders_overdue"),
+        m("metric", "", "third", metric="orders_short"),
+        m("orders", "客户订单与发货"),
+        m("boxes", "称重打标签"),
+    ]
+
+
+def ensure_tnt(db):
+    """大统华（T&T Supermarket US Inc.）与 Chino Hills 送货点。资料来自用户提供的 PO。"""
+    c = db.query(Customer).filter_by(code="TNT").first()
+    if c:
+        return c
+    c = Customer(code="TNT", name="大统华 T&T Supermarket US Inc.", vendor_no="10325", invoice_email="wfa.invoice@tntsupermarket.us",
+                 notes="系统 PO（9 位数字单号，按箱，有 Item#）与中央厨房手写 PO（单号如 CH-CK，按磅）两种格式。超订量、质量不良或过期送货会被拒收；送货必须出示 PO。")
+    db.add(c)
+    db.flush()
+    db.add(CustomerSite(customer_id=c.id, name="Chino Hills Store - Kitchen Deli / Central Kitchen", store_no="006",
+                        address="13021 Peyton Dr, Chino Hills, CA 91709", dept="Kitchen Deli / Central Kitchen Department"))
+    return c
+
+
+def upgrade_orders():
+    """一次性：已上线库加大统华客户、订单页换成订单模块（旧模块隐藏）、老板总览加订单指标、生产页加称重打标签。"""
+    db = SessionLocal()
+    try:
+        if not db.query(User).count() or db.get(AppSetting, "migration:orders_v1"):
+            return
+        ensure_tnt(db)
+        actor = db.query(User).filter_by(role="sys_admin").first() or db.query(User).first()
+
+        def republish(p, modules, note):
+            layout = normalize_layout({"modules": modules})
+            n = (max([v.version_no for v in db.query(PageVersion).filter_by(page_id=p.id)] or [0])) + 1
+            v = PageVersion(page_id=p.id, version_no=n, layout=layout, note=note, published_by=actor.id)
+            db.add(v)
+            db.flush()
+            p.published_version_id, p.draft, p.draft_rev = v.id, copy.deepcopy(layout), p.draft_rev + 1
+
+        def current(p):
+            v = db.get(PageVersion, p.published_version_id) if p.published_version_id else None
+            return list(v.layout["modules"]) if v else []
+
+        for p in db.query(Page).filter_by(name="订单与配送"):
+            republish(p, ORDERS_MODULES() + [{**x, "hidden": True} for x in current(p)], "系统升级：客户订单与发货（原通用订单台账已隐藏，可恢复或回滚）")
+        for p in db.query(Page).filter_by(name="老板总览"):
+            mods = current(p)
+            have = {x.get("config", {}).get("metric") for x in mods}
+            add = [m("metric", "", "third", metric=k) for k in ("orders_due_soon", "orders_overdue", "orders_short") if k not in have]
+            last = max([i for i, x in enumerate(mods) if x["type"] == "metric"] or [-1])
+            republish(p, mods[:last + 1] + add + mods[last + 1:], "系统升级：加入订单指标")
+        for p in db.query(Page).filter_by(name="生产"):
+            mods = current(p)
+            if not any(x["type"] == "boxes" for x in mods):
+                i = next((k for k, x in enumerate(mods) if x["type"] == "production"), -1)
+                mods = [{**x, "title": "切配生产"} if x["type"] == "production" else x for x in mods]
+                republish(p, mods[:i + 1] + [m("boxes", "补打标签 / 单独称重")] + mods[i + 1:], "系统升级：切配生产（备料、损耗）与称重打标签")
+        db.add(AppSetting(key="migration:orders_v1", value={"done": True}))
+        db.commit()
+    finally:
+        db.close()
+
+
 def canada_sources():
     return [Warehouse(code="TOR", name="多伦多（公司）", kind="company", tracked=False),
             Warehouse(code="VAN", name="温哥华（公司）", kind="company", tracked=False)]
@@ -50,6 +114,8 @@ def upgrade_sources():
         have = {w.code for w in db.query(Warehouse)}
         db.add_all([w for w in canada_sources() if w.code not in have])
         db.add(AppSetting(key="migration:canada_sources_v1", value={"done": True}))
+        db.add(AppSetting(key="migration:orders_v1", value={"done": True}))
+        ensure_tnt(db)
         db.commit()
     finally:
         db.close()
@@ -119,9 +185,16 @@ def seed_if_empty():
             "RM-SPICE": Sku(code="RM-SPICE", name="示例 香料包", category="原料", base_unit="箱", conversions={"包": 50}),
             "PK-TRAY": Sku(code="PK-TRAY", name="示例 包装托盘", category="包材", base_unit="箱"),
             "FG-SOUP": Sku(code="FG-SOUP", name="示例 成品汤料", category="成品", base_unit="箱"),
+            "FG-CHK-DICE": Sku(code="FG-CHK-DICE", name="示例 切粒鸡丁", category="成品", base_unit="磅", catch_weight=True, ship_pack=50),
+            "FG-PORK-DICE": Sku(code="FG-PORK-DICE", name="示例 切粒咕咾肉", category="成品", base_unit="磅", catch_weight=True, ship_pack=50),
+            "RM-CHK-LEG": Sku(code="RM-CHK-LEG", name="示例 鸡腿肉（原料）", category="原料", base_unit="磅", catch_weight=True, purchase_pack=40),
+            "RM-PORK-BUTT": Sku(code="RM-PORK-BUTT", name="示例 梅头肉（原料）", category="原料", base_unit="磅", catch_weight=True, purchase_pack=65),
         }
         db.add_all(skus.values())
         db.flush()
+        from .models import Recipe
+        db.add(Recipe(output_sku_id=skus["FG-CHK-DICE"].id, lines=[{"sku_id": skus["RM-CHK-LEG"].id, "per_output": round(1 / 0.95, 6)}], note="示例：出成率 95%"))
+        db.add(Recipe(output_sku_id=skus["FG-PORK-DICE"].id, lines=[{"sku_id": skus["RM-PORK-BUTT"].id, "per_output": round(1 / 0.95, 6)}], note="示例：出成率 95%"))
         db.add(SafetyStock(sku_id=skus["RM-BEEF"].id, warehouse_id=wh597.id, qty=30))
         db.add(SafetyStock(sku_id=skus["FG-SOUP"].id, warehouse_id=wh597.id, qty=30))
         db.flush()
@@ -258,6 +331,8 @@ def seed_if_empty():
             m("metric", "", "third", metric="unverified_evidence"), m("metric", "", "third", metric="pending_ingest"),
             m("metric", "", "third", metric="in_transit"), m("metric", "", "third", metric="po_pending_approval"),
             m("metric", "", "third", metric="po_overdue"), m("metric", "", "third", metric="receipts_pending"),
+            m("metric", "", "third", metric="orders_due_soon"), m("metric", "", "third", metric="orders_overdue"),
+            m("metric", "", "third", metric="orders_short"),
             m("kanban", "待决策 / 受阻 / 待核验", source="tasks", task_filter={"status": "blocked,review"}),
         ]}, roles=mgmt, desc="每个指标都能下钻；没有数据显示未知，不显示正常")
         page("任务与异常", "list-checks", "总览", 2, {"modules": [
@@ -271,18 +346,15 @@ def seed_if_empty():
             m("form", "新增设备/项目", "half", source="records", record_type_id=eq_rt.id),
             m("text", "说明", "half", body="建设验收与持续服务分开。设备「已验收」需要验收表与安装后照片，且需核验通过。"),
         ]})
-        page("订单与配送", "truck", "业务", 12, {"modules": [
-            m("table", "客户订单", source="records", record_type_id=od_rt.id,
-              columns=["title", "status", od_f["客户"], od_f["PO号"], od_f["交货日期"], od_f["箱数"]]),
-            m("form", "录入客户 PO", "half", source="records", record_type_id=od_rt.id),
-        ]})
+        page("订单与配送", "truck", "业务", 12, {"modules": ORDERS_MODULES()})
         page("库存与调拨", "boxes", "业务", 13, {"modules": [
             m("metric", "", "third", metric="below_safety"), m("metric", "", "third", metric="in_transit"),
             m("metric", "", "third", metric="quarantined_lots"),
             m("stock", "多仓库存"), m("transfers", "调拨"),
         ]})
         page("生产", "factory", "业务", 14, {"modules": [
-            m("production", "生产批次"),
+            m("production", "切配生产"),
+            m("boxes", "补打标签 / 单独称重"),
             m("lots", "批次质量状态", "full", category=None),
         ]})
         sanit = m("checklist", "开工卫生检查", daily_required=True, create_task_on_fail=True, items=[

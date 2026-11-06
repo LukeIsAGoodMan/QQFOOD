@@ -207,10 +207,16 @@ def scan(code: str, u: User = Depends(current_user), db: Session = Depends(get_d
     tr = db.query(Transfer).filter_by(code=code).first()
     if tr:
         return {"type": "transfer", "transfer_id": tr.id}
-    from ..models import PurchaseOrder
+    from ..models import Box, PurchaseOrder, SalesOrder
     po = db.query(PurchaseOrder).filter_by(code=code).first()
     if po:
         return {"type": "po", "po_id": po.id, "code": po.code}
+    bx = db.query(Box).filter_by(serial=code.upper()).first()
+    if bx:
+        return {"type": "box", "box_id": bx.id, "serial": bx.serial, "sku_id": bx.sku_id, "weight": bx.weight, "status": bx.status}
+    so = db.query(SalesOrder).filter((SalesOrder.code == code.upper()) | (SalesOrder.po_no == code)).first()
+    if so:
+        return {"type": "so", "order_id": so.id, "code": so.code}
     raise HTTPException(404, f"未识别的编码：{code}")
 
 

@@ -426,6 +426,103 @@ let exceptionTaskId
   await page.context().close()
 }
 
+// ---------- 11. 大统华订单：ChatGPT 录 PO → 手机确认（给未配对行选 SKU）→ 称重打标签 → 选箱发货 → 发货单 → 登记送达 ----------
+{
+  const page = await login('boss')
+  const crypto = await import('node:crypto')
+  const req = page.context().request
+  const redirect = 'http://127.0.0.1:9/oauth-callback'
+  const reg = await (await req.post(`${BASE}/oauth/register`, { data: { client_name: 'ChatGPT', redirect_uris: [redirect] } })).json()
+  const verifier = crypto.randomBytes(32).toString('base64url')
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url')
+  const auth = await req.post(`${BASE}/oauth/authorize`, { form: { response_type: 'code', client_id: reg.client_id, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', username: 'boss', password: 'qq597demo', scope_write: 'on' }, maxRedirects: 0 })
+  const code = new URL(auth.headers()['location']).searchParams.get('code')
+  const tok = await (await req.post(`${BASE}/oauth/token`, { form: { grant_type: 'authorization_code', code, redirect_uri: redirect, code_verifier: verifier, client_id: reg.client_id } })).json()
+  const mcp = async (name, args) => (await (await req.post(`${BASE}/mcp`, { headers: { Authorization: `Bearer ${tok.access_token}` }, data: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } })).json()).result.structuredContent
+  const sys = await mcp('propose_order', { po_no: '623030106', po_date: '2026-10-30', required_date: '2026-11-04', category: 'General', site: 'Chino Hills Store - 0KITCHEN DELI', source_summary: 'PDF 第 2 页',
+    lines: [{ item_no: '539121', description: 'CHILI POWDER PAPA CHICKEN', pack_size: '10gx1000/1.00', unit: 'case', qty: 6, price: 145 }] })
+  ok('系统 PO 提交：未配对行可确认', sys.summary.unmapped === 1, JSON.stringify(sys.summary))
+  await page.goto(sys.confirm_url.replace(/^https?:\/\/[^/]+/, BASE)); await page.waitForTimeout(1200)
+  await page.locator('main select').filter({ hasText: '选我们的 SKU' }).first().selectOption({ label: 'FG-SOUP 示例 成品汤料（箱）' })
+  await checkLayout(page, '订单确认（选 SKU）')
+  await shot(page, 'ord-01-confirm')
+  await page.locator('button', { hasText: '确认所选' }).tap(); await page.waitForTimeout(1000)
+  const ck = await mcp('propose_order', { po_no: 'CH-CK', po_date: '2026-11-05', required_date: '2026-11-10', category: '中央厨房', site: 'Chino Hills', source_summary: '中央厨房手写 PO',
+    lines: [{ description: 'Chicken Leg-Diced 切粒鸡丁', unit: 'lb', qty: 300, price: 3.6, sku_code: 'FG-CHK-DICE' }] })
+  await page.goto(ck.confirm_url.replace(/^https?:\/\/[^/]+/, BASE)); await page.waitForTimeout(1000)
+  await page.locator('button', { hasText: '确认所选' }).tap(); await page.waitForTimeout(1000)
+  const orders = await api(page, '/api/orders?open_only=true')
+  const ckOrder = orders.find((o) => o.po_no === 'CH-CK'), sysOrder = orders.find((o) => o.po_no === '623030106')
+  ok('两张 PO 都已建成订单、全部配对', !!ckOrder && !!sysOrder && sysOrder.unmapped === 0)
+  // weigh 6 boxes on the phone
+  await page.goto(`${BASE}/orders`); await page.waitForTimeout(1200)
+  await checkLayout(page, '订单页')
+  await shot(page, 'ord-02-list')
+  const boxes = page.locator('section:has(h2:has-text("称重打标签"))')
+  await boxes.locator('select').first().selectOption({ label: 'FG-CHK-DICE 示例 切粒鸡丁' })
+  await boxes.locator('input[placeholder^="如 CK"]').fill('CK1106')
+  for (const w of ['50.2', '49.8', '50', '50.4', '49.6', '50.1']) { await boxes.locator('input[placeholder="50.2"]').fill(w); await boxes.locator('button', { hasText: '加一箱' }).tap() }
+  await checkLayout(page, '称重打标签')
+  await boxes.locator('button', { hasText: '生成 6 箱' }).tap(); await page.waitForTimeout(1000)
+  await shot(page, 'ord-03-labels')
+  ok('称重 6 箱并生成标签', await page.locator('div[role=dialog]:has-text("箱标签（6）")').count() > 0)
+  await page.locator('div[role=dialog] button[aria-label="关闭"]').tap(); await page.waitForTimeout(400)
+  // ship by selecting boxes
+  await page.goto(`${BASE}/orders?so=${ckOrder.id}`); await page.waitForTimeout(1200)
+  await checkLayout(page, '订单详情（称重）')
+  await page.locator('div[role=dialog] button', { hasText: '发货' }).first().tap(); await page.waitForTimeout(600)
+  const ship = page.locator('div[role=dialog]').last()
+  for (const chip of await ship.locator('button.chip').all()) await chip.tap()
+  await checkLayout(page, '发货（选箱）')
+  await shot(page, 'ord-04-ship')
+  await ship.locator('button', { hasText: '确认发货' }).tap(); await page.waitForTimeout(1000)
+  const shipped = await api(page, `/api/orders/${ckOrder.id}`)
+  ok('选 6 箱发货，按实重 300.1 lb 计', shipped.status === 'shipped' && shipped.lines[0].qty_shipped === 300.1, `${shipped.status_label} ${shipped.lines[0].qty_shipped} lb ${shipped.shipped_amount}`)
+  await page.locator('div[role=dialog] button', { hasText: '打印发货单' }).tap(); await page.waitForTimeout(500)
+  await checkLayout(page, '发货单')
+  await shot(page, 'ord-05-slip')
+  await page.locator('div[role=dialog]').last().locator('button[aria-label="关闭"]').tap(); await page.waitForTimeout(300)
+  await page.locator('div[role=dialog] button', { hasText: '登记送达' }).tap(); await page.waitForTimeout(500)
+  await page.locator('div[role=dialog]').last().locator('input[placeholder^="没有签收单"], label:has-text("没有签收单") input').first().fill('司机在门店拍照，签收单稍后补')
+  await page.locator('div[role=dialog]').last().locator('button', { hasText: '确认送达' }).tap(); await page.waitForTimeout(900)
+  ok('手机登记送达（例外：签收单后补）', (await api(page, `/api/orders/${ckOrder.id}`)).status === 'delivered')
+  await page.context().close()
+}
+
+// ---------- 12. 切配生产：300 lb 咕咾肉 → 备料按 65 lb/箱买 5 箱 → 生成采购草稿 → 原料到货 → 生产完工（逐箱称重，剩余算损耗）----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => (await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined })).json(), [path, body, method])
+  const m = await api(page, '/api/inv/master')
+  const S = Object.fromEntries(m.skus.map((s) => [s.code, s.id])), W = Object.fromEntries(m.warehouses.map((w) => [w.code, w.id]))
+  const tnt = (await api(page, '/api/orders/customers')).find((c) => c.code === 'TNT')
+  await call('/api/orders', { customer_id: tnt.id, site_id: tnt.sites[0].id, po_no: 'CH-CK', po_date: '2026-11-07', required_date: '2026-11-11',
+    lines: [{ description: 'Pork Shoulder Butt-Diced 切粒咕咾肉', unit: 'lb', qty: 300, price: 3.68, sku_id: S['FG-PORK-DICE'] }] })
+  await page.goto(`${BASE}/production`); await page.waitForTimeout(1500)
+  await checkLayout(page, '生产 · 备料计划')
+  await shot(page, 'prd-01-plan')
+  ok('备料建议 梅头肉 5 箱 × 65 = 325 lb', await page.locator('text=5 箱 × 65 = 325').count() > 0)
+  await page.locator('input[placeholder="供应商（可空）"]').fill('梅头肉供应商')
+  await page.locator('button', { hasText: '生成采购单草稿' }).tap(); await page.waitForTimeout(1500)
+  ok('一键生成采购单草稿', new URL(page.url()).searchParams.get('po') !== null)
+  await call('/api/inv/receive', { idempotency_key: crypto.randomUUID(), sku_id: S['RM-PORK-BUTT'], warehouse_id: W['WH597'], qty: 325, lot_code: 'PORK-1107' })
+  await page.goto(`${BASE}/production`); await page.waitForTimeout(1500)
+  await page.locator('button', { hasText: '去生产' }).first().tap(); await page.waitForTimeout(900)
+  const dlg = page.locator('div[role=dialog]')
+  const inputs = dlg.locator('input[aria-label^="第"]')
+  const ws = ['50.2', '49.9', '50.1', '50.3', '49.8', '50.0']
+  for (let i = 0; i < ws.length; i++) await inputs.nth(i).fill(ws[i])
+  await checkLayout(page, '生产完工（称重）')
+  await shot(page, 'prd-02-run')
+  await dlg.locator('label:has-text("完工即放行") input').check()
+  await dlg.locator('button', { hasText: '完工并打印标签' }).tap(); await page.waitForTimeout(1200)
+  const runs = await api(page, '/api/production/runs')
+  const r = runs.find((x) => x.product_code === 'FG-PORK-DICE')
+  ok('生产记录：投入 325、产出 300.3、损耗 24.7', r && r.consumed_qty === 325 && r.output_qty === 300.3 && r.loss_qty === 24.7, r && `出成率 ${r.yield_pct}%`)
+  ok('完工后打印 6 箱标签', await page.locator('div[role=dialog]:has-text("箱标签（6）")').count() > 0)
+  await page.context().close()
+}
+
 await browser.close()
 const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} 通过；页面脚本错误 ${pageErrors.length} 个；截图在 e2e/screenshots/`)
