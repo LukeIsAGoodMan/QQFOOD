@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import QRCode from 'qrcode'
-import { AlertTriangle, Plus, Printer, Scale, Send, Trash2, Truck, Users } from 'lucide-react'
+import { AlertTriangle, Download, FileSpreadsheet, Plus, Printer, Scale, Send, Trash2, Truck, Users } from 'lucide-react'
 import { get, patch, post, uuid } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { dt, num } from '../lib/fmt'
@@ -309,12 +309,69 @@ export function OrderDetail({ id, onClose, onChanged }: { id: string; onClose: (
       <div className="sticky bottom-0 -mx-4 -mb-4 flex gap-2 overflow-x-auto border-t bg-white px-4 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] [&>button]:shrink-0">
         {openish && so.can.ship && <button className="btn-primary" onClick={() => setDlg({ t: 'ship' })}><Truck size={16} />发货</button>}
         <button className="btn-secondary" onClick={() => setDlg({ t: 'slip' })}><Printer size={16} />打印发货单</button>
+        {so.can.manage && so.shipped_amount > 0 && <button className="btn-secondary" onClick={() => setDlg({ t: 'qb' })}><FileSpreadsheet size={16} />QuickBooks 发票</button>}
         {openish && so.can.manage && so.shipments.length > 0 && <button className="btn-ghost" onClick={() => { const r = prompt('结案原因（剩余不再发，记得通知客户）'); if (r) act('close', { reason: r }) }}>按已发结案</button>}
         {openish && so.can.manage && !so.shipments.length && <button className="btn-ghost text-red-600" onClick={() => { const r = prompt('取消原因'); if (r) act('cancel', { reason: r }) }}>取消订单</button>}
       </div>
       {dlg?.t === 'ship' && <ShipDialog so={so} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.t === 'slip' && <PackingSlip so={so} shipment={dlg.s} onClose={() => setDlg(null)} />}
+      {dlg?.t === 'qb' && <QuickBooksDialog so={so} onClose={() => setDlg(null)} />}
       {dlg?.t === 'deliver' && <DeliverDialog so={so} shipment={dlg.s} onClose={() => setDlg(null)} onDone={reload} />}
+    </Modal>
+  )
+}
+
+// ---------------- QuickBooks 发票导出 ----------------
+const laToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })
+
+function QuickBooksDialog({ so, onClose }: { so: any; onClose: () => void }) {
+  const toast = useToast()
+  const others = useLoad(() => get('/api/orders?status=partial,shipped,delivered,closed'), [])
+  const [picked, setPicked] = useState<Set<string>>(new Set([so.id]))
+  const [f, setF] = useState({ invoice_no: `QQUSA${laToday().replaceAll('-', '')}`, invoice_date: laToday(), terms: 'Net 30', customer_name: so.customer_accounting_name, basis: 'shipped' })
+  const [res, setRes] = useState<any>(null)
+  const same = (others.data || []).filter((o: any) => o.customer_id === so.customer_id && o.shipped_amount > 0).slice(0, 30)
+  const toggle = (id: string) => { const n = new Set(picked); n.has(id) ? n.delete(id) : n.add(id); setPicked(n); setRes(null) }
+  const go = async () => { try { setRes(await post('/api/orders/quickbooks', { ...f, order_ids: [...picked] })) } catch (e) { toast(errMsg(e), 'err') } }
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([res.csv], { type: 'text/csv;charset=utf-8' }))
+    const a = document.createElement('a')
+    a.href = url; a.download = res.filename; document.body.appendChild(a); a.click(); a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+  }
+  return (
+    <Modal open onClose={onClose} title="导出 QuickBooks 发票" footer={res
+      ? <button className="btn-primary" onClick={download}><Download size={16} />下载 {res.filename}</button>
+      : <button className="btn-primary" disabled={!picked.size || !f.invoice_no.trim()} onClick={go}>生成</button>}>
+      <div className="space-y-3 text-sm">
+        <p className="text-xs text-slate-500">生成 QuickBooks Online「导入发票」用的 CSV：商品用 QuickBooks 品名（在「商品对照」里设），描述里带客户的 Item#。导入：QuickBooks ⚙ 设置 → 导入数据 → 发票。</p>
+        <div>
+          <div className="mb-1 font-medium">合并到这张发票的订单（同一客户）</div>
+          <div className="max-h-48 space-y-1 overflow-y-auto">
+            {same.map((o: any) => (
+              <label key={o.id} className="flex min-h-11 items-center gap-2 rounded border border-slate-200 px-2">
+                <input type="checkbox" checked={picked.has(o.id)} onChange={() => toggle(o.id)} />
+                <span className="font-mono">PO {o.po_no}</span><span className="min-w-0 flex-1 truncate text-xs text-slate-500">{o.site} · {o.status_label}</span><span className="text-xs">${num(o.shipped_amount)}</span>
+              </label>
+            ))}
+            {!others.data && <Spinner />}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="发票号"><input className="input" value={f.invoice_no} onChange={(e) => { setF({ ...f, invoice_no: e.target.value }); setRes(null) }} /></Field>
+          <Field label="发票日期"><input className="input" type="date" value={f.invoice_date} onChange={(e) => { setF({ ...f, invoice_date: e.target.value }); setRes(null) }} /></Field>
+          <Field label="账期"><input className="input" value={f.terms} onChange={(e) => { setF({ ...f, terms: e.target.value }); setRes(null) }} /></Field>
+          <Field label="QuickBooks 客户名"><input className="input" value={f.customer_name} onChange={(e) => { setF({ ...f, customer_name: e.target.value }); setRes(null) }} /></Field>
+        </div>
+        <Segmented value={f.basis} onChange={(v: string) => { setF({ ...f, basis: v }); setRes(null) }} items={[{ key: 'shipped', label: '按实发（扣拒收）' }, { key: 'ordered', label: '按订量' }]} />
+        {res && (
+          <div className="rounded-lg bg-emerald-50 p-3 text-emerald-900">
+            <div className="font-medium">{res.rows} 行 · 合计 ${num(res.total)}</div>
+            <div className="text-xs">{res.customer} · {res.invoice_date} · 到期 {res.due_date}</div>
+            {res.warnings.map((w: string, i: number) => <div key={i} className="mt-1 text-xs text-amber-800">{w}</div>)}
+          </div>
+        )}
+      </div>
     </Modal>
   )
 }

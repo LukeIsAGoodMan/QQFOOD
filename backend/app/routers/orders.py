@@ -117,7 +117,7 @@ def customers(u: User = Depends(current_user), db: Session = Depends(get_db)):
     skus = {s.id: s for s in db.query(Sku)}
     out = []
     for c in db.query(Customer).order_by(Customer.name):
-        out.append({"id": c.id, "code": c.code, "name": c.name, "vendor_no": c.vendor_no, "invoice_email": c.invoice_email, "notes": c.notes,
+        out.append({"id": c.id, "code": c.code, "name": c.name, "vendor_no": c.vendor_no, "invoice_email": c.invoice_email, "accounting_name": c.accounting_name, "notes": c.notes,
                     "sites": [{k: getattr(s, k) for k in ("id", "name", "store_no", "address", "dept", "contact", "phone", "email", "active")}
                               for s in db.query(CustomerSite).filter_by(customer_id=c.id)],
                     "items": [{"id": i.id, "item_no": i.item_no, "description": i.description, "pack_size": i.pack_size, "order_unit": i.order_unit,
@@ -337,7 +337,7 @@ def order_out(db: Session, so: SalesOrder, u: User | None = None, detail=True, n
     t = today().isoformat()
     open_ = so.status in OPEN
     d = {"id": so.id, "code": so.code, "po_no": so.po_no, "po_date": so.po_date, "required_date": so.required_date, "category": so.category,
-         "status": so.status, "status_label": STATUS_LABEL[so.status], "customer": cust.name, "customer_id": cust.id, "customer_code": cust.code,
+         "status": so.status, "status_label": STATUS_LABEL[so.status], "customer": cust.name, "customer_id": cust.id, "customer_code": cust.code, "customer_accounting_name": cust.accounting_name or cust.name,
          "site": site.name if site else None, "site_id": so.site_id, "total": round(sum(l.qty_ordered * l.price for l in lines), 2),
          "shipped_amount": round(sum(max(l.qty_shipped - l.qty_rejected, 0) * l.price for l in lines), 2),
          "overdue": bool(open_ and so.required_date and so.required_date < t),
@@ -726,3 +726,80 @@ def void_box(bid: str, body: ReasonIn, u: User = Depends(current_user), db: Sess
     audit(db, u, "box.voided", "box", b.id, serial=b.serial, reason=body.reason)
     db.commit()
     return {"ok": True}
+
+
+# ---------- QuickBooks 发票导出（QuickBooks Online「导入发票」CSV） ----------
+class QBIn(BaseModel):
+    order_ids: list[str]
+    invoice_no: str
+    invoice_date: str | None = None  # YYYY-MM-DD，默认今天（洛杉矶）
+    terms: str = "Net 30"
+    customer_name: str | None = None  # QuickBooks 里的客户名；填了会记住
+    basis: str = "shipped"  # shipped 按实发（扣拒收） | ordered 按订量
+
+
+QB_COLUMNS = ["InvoiceNo", "Customer", "InvoiceDate", "DueDate", "Terms", "Memo", "Item(Product/Service)", "ItemDescription",
+              "ItemQuantity", "ItemRate", "ItemAmount"]
+
+
+def quickbooks_invoice(db: Session, u: User, body: QBIn) -> dict:
+    import csv
+    import io
+    from .aliases import accounting_name
+    require(u, "order.manage")
+    if not body.order_ids:
+        raise HTTPException(400, "请选择订单")
+    if not body.invoice_no.strip():
+        raise HTTPException(400, "请填写发票号")
+    orders = [get_or_404(db, SalesOrder, i, "订单不存在") for i in dict.fromkeys(body.order_ids)]
+    if len({o.customer_id for o in orders}) > 1:
+        raise HTTPException(400, "一张发票只能是同一个客户的订单")
+    cust = db.get(Customer, orders[0].customer_id)
+    cname = (body.customer_name or "").strip() or cust.accounting_name or cust.name
+    if body.customer_name and body.customer_name.strip() != cust.accounting_name:
+        cust.accounting_name = body.customer_name.strip()
+    try:
+        d0 = datetime.strptime(body.invoice_date, "%Y-%m-%d").date() if body.invoice_date else datetime.now(SITE_TZ).date()
+    except ValueError:
+        raise HTTPException(400, "发票日期格式应为 YYYY-MM-DD")
+    m = re.search(r"(\d+)", body.terms or "")
+    due = d0 + timedelta(days=int(m.group(1))) if m and "net" in body.terms.lower() else d0
+    memo = "PO " + " / ".join(o.po_no for o in orders)
+    rows, warnings, missing, total = [], [], set(), 0.0
+    for o in orders:
+        for l in db.query(SOLine).filter_by(order_id=o.id).order_by(SOLine.line_no):
+            qty = (l.qty_shipped - l.qty_rejected) if body.basis == "shipped" else l.qty_ordered
+            if qty <= 1e-9:
+                if body.basis == "shipped" and l.qty_ordered > 0:
+                    warnings.append(f"PO {o.po_no} 第 {l.line_no} 行 {l.description} 没有发货，未开票")
+                continue
+            sku = db.get(Sku, l.sku_id) if l.sku_id else None
+            item = (accounting_name(db, sku.id) if sku else None)
+            if not item:
+                item = sku.name if sku else l.description
+                missing.add(f"{sku.code} {sku.name}" if sku else l.description)
+            desc = " ".join(x for x in (l.item_no, l.description, l.pack_size) if x)
+            amt = round(qty * l.price, 2)
+            total += amt
+            rows.append([body.invoice_no.strip(), cname, d0.strftime("%m/%d/%Y"), due.strftime("%m/%d/%Y"), body.terms, memo, item, desc,
+                         f"{qty:g}", f"{l.price:.2f}", f"{amt:.2f}"])
+    if not rows:
+        raise HTTPException(400, "所选订单没有可开票的行（还没发货？可改为按订量）")
+    if missing:
+        warnings.append("这些商品还没记 QuickBooks 品名，先用了我们的名称（QuickBooks 可能会新建商品）："
+                        + "、".join(sorted(missing)) + "。在库存页「商品对照」里加 QuickBooks 一栏即可。")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(QB_COLUMNS)
+    w.writerows(rows)
+    audit(db, u, "order.invoice_exported", "so", orders[0].id, invoice_no=body.invoice_no.strip(), orders=[o.code for o in orders],
+          total=round(total, 2), basis=body.basis)
+    return {"filename": f"{body.invoice_no.strip()}.csv", "csv": "﻿" + buf.getvalue(), "rows": len(rows), "total": round(total, 2),
+            "customer": cname, "invoice_date": d0.isoformat(), "due_date": due.isoformat(), "warnings": warnings}
+
+
+@router.post("/quickbooks")
+def export_quickbooks(body: QBIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    r = quickbooks_invoice(db, u, body)
+    db.commit()
+    return r

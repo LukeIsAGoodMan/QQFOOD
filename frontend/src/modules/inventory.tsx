@@ -1,6 +1,7 @@
 import { Fragment, useState } from 'react'
-import { ChevronDown, ChevronRight, Download, PackageCheck, Plus, Printer, ShieldAlert, ShieldCheck, Truck, Warehouse } from 'lucide-react'
-import { get, post, uuid } from '../lib/api'
+import { useSearchParams } from 'react-router-dom'
+import { ChevronDown, ChevronRight, Download, PackageCheck, Plus, Printer, ShieldAlert, ShieldCheck, Tags, Truck, Warehouse } from 'lucide-react'
+import { ApiError, get, post, uuid } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { ago, dt, num } from '../lib/fmt'
 import { t } from '../lib/i18n'
@@ -8,6 +9,7 @@ import { Badge, Empty, ErrorBox, Field, LOT_COLOR, LOT_LABEL, Modal, Spinner, er
 import { EvidencePanel } from '../components/Evidence'
 import { LotLabel, ScanButton } from '../components/Scan'
 import { Timeline, type ModProps } from './basic'
+import { AliasManager } from './aliases'
 
 const useMaster = () => useLoad(() => get('/api/inv/master'), [])
 
@@ -119,6 +121,8 @@ function IssueDialog({ row, lot, onClose, onDone }: any) {
 
 export function StockModule(_: ModProps) {
   const { can } = useAuth()
+  const [params, setParams] = useSearchParams()
+  const skuParam = params.get('sku')
   const master = useMaster()
   const [wh, setWh] = useState('')
   const stock = useLoad(() => get(`/api/inv/stock${wh ? `?warehouse_id=${wh}` : ''}`), [wh])
@@ -131,11 +135,12 @@ export function StockModule(_: ModProps) {
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <select className="input w-auto flex-1 sm:flex-none" value={wh} onChange={(e) => setWh(e.target.value)}>
+        <select className="input w-auto min-w-0 flex-1 sm:flex-none" value={wh} onChange={(e) => setWh(e.target.value)}>
           <option value="">全部仓库</option>{master.data.warehouses.filter((w: any) => w.tracked).map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}
         </select>
         {can('inventory.post') && <button className="btn-primary" onClick={() => setDlg({ type: 'receive' })}><PackageCheck size={16} />{t('inv.receive')}</button>}
         {can('inventory.master') && <button className="btn-secondary" onClick={() => setDlg({ type: 'warehouses' })}><Warehouse size={16} />仓库与来源地</button>}
+        <button className="btn-secondary" onClick={() => setDlg({ type: 'aliases' })}><Tags size={16} />商品对照</button>
         <span className="w-full text-xs text-slate-400 sm:ml-auto sm:w-auto">计算于 {ago(stock.data.computed_at)} · 可用 = 实物 − 隔离/待放行 − 预留；未核数不计入</span>
       </div>
       {/* phones: one card per SKU × warehouse, available qty first */}
@@ -236,6 +241,7 @@ export function StockModule(_: ModProps) {
       {dlg?.type === 'count' && <CountDialog master={master.data} row={dlg.row} lot={dlg.lot} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'issue' && <IssueDialog row={dlg.row} lot={dlg.lot} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'label' && <LotLabel sku={dlg.sku} lot={dlg.lot} onClose={() => setDlg(null)} />}
+      {(dlg?.type === 'aliases' || skuParam) && <AliasManager skuId={skuParam || undefined} onClose={() => { setDlg(null); if (skuParam) setParams((p) => { p.delete('sku'); return p }, { replace: true }) }} />}
       {dlg?.type === 'warehouses' && <Warehouses list={master.data.warehouses} onClose={() => setDlg(null)} onChanged={reload} />}
     </div>
   )
@@ -327,15 +333,23 @@ function TransferDetail({ id, onClose, onChanged }: any) {
   const [qty, setQty] = useState<Record<string, any>>({})
   const [key, setKey] = useState(uuid())
   if (!tr) return null
-  const act = async () => {
+  const act = async (reason = '') => {
     try {
       const body = mode === 'ship'
-        ? { idempotency_key: key, lines: tr.lines.map((l: any) => ({ line_id: l.id, qty: Number(qty[l.id]?.q || 0) })) }
+        ? { idempotency_key: key, shortfall_reason: reason, lines: tr.lines.map((l: any) => ({ line_id: l.id, qty: Number(qty[l.id]?.q || 0) })) }
         : { idempotency_key: key, lines: tr.lines.filter((l: any) => l.in_transit > 0).map((l: any) => ({ line_id: l.id, qty_received: Number(qty[l.id]?.q || 0), qty_damaged: Number(qty[l.id]?.d || 0) })) }
       const r = await post(`/api/inv/transfers/${id}/${mode}`, body)
       toast(r.duplicate ? '重复提交已拦截，未重复过账' : mode === 'ship' ? '已发运，进入在途' : `已签收（${TR_LABEL[r.transfer.status][0]}）`)
       setMode(''); setQty({}); setKey(uuid()); reload(); onChanged()
-    } catch (e) { toast(errMsg(e), 'err') }
+    } catch (e) {
+      // 外库账面不够（期初没录全）：例外，写原因按单据补记
+      if (e instanceof ApiError && e.detail?.code === 'source_short') {
+        const r = prompt(`${e.message}\n\n补记原因：`)
+        if (r?.trim()) return act(r.trim())
+        return
+      }
+      toast(errMsg(e), 'err')
+    }
   }
   const writeOff = async (l: any) => {
     const reason = prompt(`核销在途 ${l.in_transit}（短少/损坏）原因：`)
@@ -387,7 +401,7 @@ function TransferDetail({ id, onClose, onChanged }: any) {
         {!mode && ['requested', 'shipped', 'partial'].includes(tr.status) && can('inventory.transfer') && tr.lines.some((l: any) => l.qty_requested > l.qty_shipped) &&
           <button className="btn-secondary" onClick={() => { setMode('ship'); setQty(Object.fromEntries(tr.lines.map((l: any) => [l.id, { q: Math.max(l.qty_requested - l.qty_shipped, 0) }]))) }}><Truck size={16} />记录实际发运</button>}
         {!mode && ['shipped', 'partial'].includes(tr.status) && can('inventory.post') && <button className="btn-primary" onClick={() => setMode('receive')}><PackageCheck size={16} />现场签收</button>}
-        {mode && <><button className="btn-primary" onClick={act}>{t('common.confirm')}</button><button className="btn-ghost" onClick={() => setMode('')}>{t('common.cancel')}</button></>}
+        {mode && <><button className="btn-primary" onClick={() => act()}>{t('common.confirm')}</button><button className="btn-ghost" onClick={() => setMode('')}>{t('common.cancel')}</button></>}
       </div>
       {mode === 'receive' && <p className="mt-2 text-xs text-slate-500">部分签收保留剩余在途；短缺与损坏自动生成差异任务。重复点击不会重复过账。</p>}
       <div className="mt-5 grid gap-6 md:grid-cols-2">

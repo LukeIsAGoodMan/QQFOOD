@@ -38,6 +38,9 @@ INSTRUCTIONS = (
     "8) 库存、SKU 以工作台为唯一账本：先用 get_master_data / get_stock 读取现状，再用 propose_skus / propose_stock_counts / "
     "propose_inbound 批量提交（每批 ≤300 行，SKU 先于库存）；它们都只生成待确认批次，必须让用户打开 confirm_url 确认。"
     "不要再单独维护另一份库存表。"
+    "9) 一物多码：库存只记我们自己的 SKU。大统华 Item#、外库（如 Supreme：Vatee-001）、供应商编码、QuickBooks 品名都是“对照”，"
+    "不要为它们新建 SKU。先用 list_item_aliases 查；没有就用 propose_item_aliases 提交对照。外库 BOL / 调货单用 propose_inbound，"
+    "行里直接填对方的 party_code / party_name，系统会按对照换成我们的 SKU，对不上的由用户在确认页选一次并记住。"
 )
 
 
@@ -487,10 +490,16 @@ def get_master_data(ctx, db, query=None):
     skus = db.query(Sku).order_by(Sku.code).all()
     if query:
         skus = [s for s in skus if query.lower() in s.code.lower() or query in s.name]
+    from ..routers import aliases as al_r
+    al = {}
+    for a in al_r.all_aliases(db):
+        if a["sku"]:
+            al.setdefault(a["sku"]["id"], []).append(f"{a['party']}:{a['code'] or a['name']}")
     return {"warehouses": [{"code": w.code, "name": w.name, "kind": w.kind, "tracked": w.tracked} for w in whs.values()],
             "sku_categories": bat_r.SKU_CATEGORIES,
             "skus": [{"code": s.code, "name": s.name, "category": s.category, "base_unit": s.base_unit, "conversions": s.conversions,
-                      "barcode": s.barcode, "safety_stock": ss.get(s.id, {})} for s in skus[:500]], "sku_count": len(skus)}
+                      "barcode": s.barcode, "safety_stock": ss.get(s.id, {}), "aliases": al.get(s.id, [])} for s in skus[:500]], "sku_count": len(skus),
+            "note": "aliases 是这个 SKU 在各方的编码（对方:编码），详情用 list_item_aliases。"}
 
 
 def _batch_reply(ctx, b, db):
@@ -498,7 +507,8 @@ def _batch_reply(ctx, b, db):
     errs = [{"row": r["index"] + 1, "key": r["key"], "problems": r["messages"]} for r in d["rows"] if r["action"] == "error"][:30]
     warns = [{"row": r["index"] + 1, "key": r["key"], "note": r["messages"]} for r in d["rows"] if r["action"] != "error" and r["messages"]][:30]
     return {"status": "pending_confirmation", "batch": b.code, "summary": d["summary"],
-            "summary_legend": {"new": "新增", "update": "修改", "set": "将设定数量", "unchanged": "无变化", "duplicate": "疑似重复（默认不勾）", "error": "有错误（不能确认）"},
+            "summary_legend": {"new": "新增", "update": "修改", "set": "将设定数量", "unchanged": "无变化", "duplicate": "疑似重复（默认不勾）", "error": "有错误（不能确认）",
+                               "mapped": "已按对照对上", "unmapped": "未对上我们的 SKU（用户在确认页选一次即记住）"},
             "errors": errs, "warnings": warns, "confirm_url": ctx.link(f"/ingest?batch={b.id}"),
             "message": "已提交为待确认批次，尚未生效。请用户打开 confirm_url 勾选确认。若有错误行，可修正后另提一批。"}
 
@@ -515,8 +525,9 @@ def propose_skus(ctx, db, rows, source_summary):
     return _batch_reply(ctx, b, db)
 
 
-@tool("propose_stock_counts", "批量提交期初/盘点数量", "按 SKU × 仓库 × Lot 提交数量（绝对值，不是增减）。rows 每行：sku_code、warehouse_code（默认 WH597）、lot_code（可空）、qty、"
-      "unit（可空=基本单位）、counted（true=实盘写入实物；false=估计，写入“未核数”不算可用）、note。不会直接生效。",
+@tool("propose_stock_counts", "批量提交期初/盘点数量", "按 SKU × 仓库 × Lot 提交数量（绝对值，不是增减）。rows 每行：sku_code、warehouse_code（默认 WH597；外库库存报表用 SUPREME）、lot_code（可空）、qty、"
+      "unit（可空=基本单位）、counted（true=实盘写入实物；false=估计，写入“未核数”不算可用）、note。"
+      "外库报表上是对方编码时，可不填 sku_code，改填 party_code / party_name，系统按对照找我们的 SKU。不会直接生效。",
       {"rows": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},
        "source_summary": {"type": "string"}, "as_of": {"type": "string", "description": "数据日期，如 2026-11-05"}},
       ["rows", "source_summary"], tier="propose")
@@ -527,8 +538,10 @@ def propose_stock_counts(ctx, db, rows, source_summary, as_of=None):
     return _batch_reply(ctx, b, db)
 
 
-@tool("propose_inbound", "提交公司调入", "多伦多/温哥华等公司地点发来的货（不走采购）：一张调入单。from_code 如 TOR / VAN，to_code 默认 WH597；"
-      "lines 每行 sku_code、lot_code、qty、unit。确认后记为在途，到货时现场签收。不会直接生效。",
+@tool("propose_inbound", "提交调入（外库 / 公司）", "外库（如 Supreme Logistics，编码 SUPREME）出库送到 597 的 BOL，或多伦多/温哥华发来的货（不走采购）：一张单调用一次。"
+      "from_code 如 SUPREME / TOR / VAN，to_code 默认 WH597；note 填 BOL 号、车次。lines 每行：party_code（对方编码，如 Vatee-001）、party_name（对方品名）、"
+      "sku_code（知道我们的 SKU 才填）、lot_code（BOL 上的 Lot#）、expiry、qty（按单据数量）、unit（对方单位，如 箱/CS；可空）。"
+      "系统按对照换算成我们的 SKU 和基本单位；外库在本系统管账，调出会扣外库库存。确认后记为在途，到货时现场签收。不会直接生效。",
       {"from_code": {"type": "string"}, "to_code": {"type": "string"}, "expected_date": {"type": "string", "description": "YYYY-MM-DD"},
        "note": {"type": "string", "description": "车次、柜号、BOL 等"},
        "lines": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},
@@ -537,6 +550,40 @@ def propose_inbound(ctx, db, from_code, lines, source_summary, to_code="WH597", 
     b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="inbound", rows=lines, meta={"from_code": from_code, "to_code": to_code,
                                                                                           "expected_date": expected_date, "note": note},
                                                         source_note=source_summary), source=f"agent:{ctx.client}")
+    db.commit()
+    return _batch_reply(ctx, b, db)
+
+
+# ---------- 商品对照（一物多码） ----------
+@tool("list_item_aliases", "商品对照（一物多码）", "查我们的 SKU 在各方的编码/品名：客户（大统华 Item#）、外库（Supreme 代码）、供应商、QuickBooks 品名、旧称，"
+      "以及换算（对方 1 个单位 = 多少个我们的基本单位）。可按我们的 SKU、对方编码或品名搜，也可按类型过滤。",
+      {"query": {"type": "string", "description": "任意一方的编码或品名，如 538949、Vatee-001、油条"},
+       "sku_code": {"type": "string"}, "party_kind": {"type": "string", "enum": ["customer", "warehouse", "supplier", "accounting", "other"]}})
+def list_item_aliases(ctx, db, query=None, sku_code=None, party_kind=None):
+    from ..routers import aliases as al_r
+    sku_id = None
+    if sku_code:
+        s = db.query(Sku).filter_by(code=sku_code.strip().upper()).first()
+        if not s:
+            raise ToolError(f"我们没有 SKU {sku_code}")
+        sku_id = s.id
+    rows = al_r.all_aliases(db, sku_id, query, party_kind)
+    return {"count": len(rows), "aliases": [{"our_sku": (r["sku"] or {}).get("code"), "our_name": (r["sku"] or {}).get("name"),
+                                             "base_unit": (r["sku"] or {}).get("base_unit"), "party_kind": r["party_kind"], "party": r["party"],
+                                             "code": r["code"], "name": r["name"], "pack_size": r["pack_size"], "unit": r["unit"],
+                                             "factor": r["factor"]} for r in rows[:300]],
+            "parties": {k: [p["value"] for p in v] for k, v in al_r.parties(ctx.user, db).items() if k != "kinds"}}
+
+
+@tool("propose_item_aliases", "批量提交商品对照", "把各方的编码/品名对到我们的 SKU（不新建 SKU）。rows 每行：sku_code（我们的 SKU，必填）、party（对方：TNT / SUPREME / 供应商名 / QuickBooks）、"
+      "party_kind（可空自动判断：customer 客户、warehouse 外库、supplier 供应商、accounting QuickBooks、other 旧称）、code（对方编码）、name（对方品名）、"
+      "pack_size（对方规格，如 120g×4×16/CS）、unit（对方单位）、factor（对方 1 个单位 = 多少个我们的基本单位，单位相同填 1）。"
+      "例：{sku_code:'QQ-YOUTIAO', party:'SUPREME', code:'Vatee-001', name:'FRZ CANTONESE FRIED DOUGH STICK', unit:'箱', factor:1}。不会直接生效。",
+      {"rows": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},
+       "source_summary": {"type": "string", "description": "来源，如 “Supreme 11/3 BOL S26-39513 + 我们 11/8 发票”"}},
+      ["rows", "source_summary"], tier="propose")
+def propose_item_aliases(ctx, db, rows, source_summary):
+    b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="alias_upsert", rows=rows, source_note=source_summary), source=f"agent:{ctx.client}")
     db.commit()
     return _batch_reply(ctx, b, db)
 

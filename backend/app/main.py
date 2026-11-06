@@ -11,7 +11,7 @@ from .db import Base, engine
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 from .agent import oauth as agent_oauth, server as agent_server
-from .routers import admin, auth, batches, evidence, ingest, inventory, metrics, notebook, orders, pages, production, purchasing, records, tasks
+from .routers import admin, aliases, auth, batches, evidence, ingest, inventory, metrics, notebook, orders, pages, production, purchasing, records, tasks
 
 def _ensure_columns():
     """Tiny forward-only migration for columns added after v0.1 (create_all does not alter tables)."""
@@ -23,6 +23,7 @@ def _ensure_columns():
             "production_batches": [("order_id", "VARCHAR(32)"), ("consumed_qty", "FLOAT"), ("loss_qty", "FLOAT"), ("yield_pct", "FLOAT"),
                                    ("expected_yield_pct", "FLOAT"), ("loss_reason", "VARCHAR(300) NOT NULL DEFAULT ''"),
                                    ("boxes", "INTEGER NOT NULL DEFAULT 0")],
+            "customers": [("accounting_name", "VARCHAR(200) NOT NULL DEFAULT ''")],
             "purchase_orders": [("doc_type", "VARCHAR(16) NOT NULL DEFAULT 'invoice'"), ("exceptions", "JSON NOT NULL DEFAULT '[]'"),
                                 ("quick", "BOOLEAN NOT NULL DEFAULT 0")]}
     with engine.begin() as conn:
@@ -58,6 +59,8 @@ async def lifespan(_app):
     upgrade_sources()
     from .seed import upgrade_orders
     upgrade_orders()
+    from .seed import upgrade_aliases
+    upgrade_aliases()
     _load_org_mode()
     yield
 
@@ -67,7 +70,7 @@ app = FastAPI(title="QQ Food 597 运营管理系统", version="0.3.0", lifespan=
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
-for r in (auth, pages, records, tasks, evidence, inventory, purchasing, orders, production, batches, admin, notebook, ingest, metrics, agent_oauth, agent_server):
+for r in (auth, pages, records, tasks, evidence, inventory, aliases, purchasing, orders, production, batches, admin, notebook, ingest, metrics, agent_oauth, agent_server):
     app.include_router(r.router)
 
 

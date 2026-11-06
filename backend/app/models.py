@@ -690,6 +690,7 @@ class Customer(Base):
     name: Mapped[str] = mapped_column(String(200))
     vendor_no: Mapped[str] = mapped_column(String(40), default="")  # 我们在对方系统里的供应商号（如大统华 10325）
     invoice_email: Mapped[str] = mapped_column(String(200), default="")
+    accounting_name: Mapped[str] = mapped_column(String(200), default="")  # QuickBooks 里的客户名（导出发票用）
     notes: Mapped[str] = mapped_column(Text, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = TS()
@@ -721,6 +722,24 @@ class CustomerItem(Base):
     sku_id: Mapped[str] = mapped_column(ForeignKey("skus.id"))
     factor: Mapped[float] = mapped_column(Float, default=1.0)
     last_price: Mapped[float | None] = mapped_column(Float)
+    updated_at: Mapped[datetime] = TS()
+
+
+class SkuAlias(Base):
+    """商品对照（一物多码）：同一个我们的 SKU 在外库、供应商、QuickBooks、旧称里的编码/品名。
+    库存只记我们的 SKU；客户（大统华）的对照沿用 customer_items。factor = 对方 1 个单位等于多少个我们的基本单位。"""
+    __tablename__ = "sku_aliases"
+    id: Mapped[str] = _id("al")
+    sku_id: Mapped[str] = mapped_column(ForeignKey("skus.id"), index=True)
+    party_kind: Mapped[str] = mapped_column(String(16))  # warehouse 外库/调货来源 | supplier 供应商 | accounting QuickBooks | other 旧称
+    party: Mapped[str] = mapped_column(String(120))  # 仓库编码（SUPREME）/ 供应商名 / QuickBooks / 说明
+    code: Mapped[str] = mapped_column(String(80), default="")
+    name: Mapped[str] = mapped_column(String(300), default="")
+    pack_size: Mapped[str] = mapped_column(String(60), default="")
+    unit: Mapped[str] = mapped_column(String(16), default="")
+    factor: Mapped[float] = mapped_column(Float, default=1.0)
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    note: Mapped[str] = mapped_column(String(300), default="")
     updated_at: Mapped[datetime] = TS()
 
 
