@@ -249,6 +249,7 @@ class Sku(Base):
     base_unit: Mapped[str] = mapped_column(String(16), default="箱")
     conversions: Mapped[dict] = mapped_column(JSON, default=dict)  # {"磅": 20} => 1 base unit = 20 lb
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    catch_weight: Mapped[bool] = mapped_column(Boolean, default=False)  # 称重品：基本单位为磅，每箱实重不同
 
 
 class SafetyStock(Base):
@@ -669,3 +670,121 @@ class BatchProposal(Base):
     created_at: Mapped[datetime] = TS()
     decided_by: Mapped[str | None] = mapped_column(String(32))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------- Customers & sales orders (PRD §6.5 ORD-01..03) ----------
+class Customer(Base):
+    __tablename__ = "customers"
+    id: Mapped[str] = _id("cu")
+    code: Mapped[str] = mapped_column(String(32), unique=True)
+    name: Mapped[str] = mapped_column(String(200))
+    vendor_no: Mapped[str] = mapped_column(String(40), default="")  # 我们在对方系统里的供应商号（如大统华 10325）
+    invoice_email: Mapped[str] = mapped_column(String(200), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = TS()
+
+
+class CustomerSite(Base):
+    __tablename__ = "customer_sites"
+    id: Mapped[str] = _id("cs")
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))          # Chino Hills Store - Kitchen Deli
+    store_no: Mapped[str] = mapped_column(String(20), default="")  # 006
+    address: Mapped[str] = mapped_column(String(300), default="")
+    dept: Mapped[str] = mapped_column(String(100), default="")
+    contact: Mapped[str] = mapped_column(String(100), default="")
+    phone: Mapped[str] = mapped_column(String(60), default="")
+    email: Mapped[str] = mapped_column(String(200), default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class CustomerItem(Base):
+    """客户品项对照：客户的 Item# / 品名 → 我们的 SKU；factor = 每个客户下单单位等于多少个 SKU 基本单位。"""
+    __tablename__ = "customer_items"
+    id: Mapped[str] = _id("ci")
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"), index=True)
+    item_no: Mapped[str] = mapped_column(String(40), default="")
+    description: Mapped[str] = mapped_column(String(300))
+    pack_size: Mapped[str] = mapped_column(String(60), default="")
+    order_unit: Mapped[str] = mapped_column(String(16), default="箱")  # 箱 / 磅 …
+    sku_id: Mapped[str] = mapped_column(ForeignKey("skus.id"))
+    factor: Mapped[float] = mapped_column(Float, default=1.0)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    updated_at: Mapped[datetime] = TS()
+
+
+class SalesOrder(Base):
+    __tablename__ = "sales_orders"
+    id: Mapped[str] = _id("so")
+    code: Mapped[str] = mapped_column(String(40), unique=True)
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"))
+    site_id: Mapped[str | None] = mapped_column(ForeignKey("customer_sites.id"), nullable=True)
+    po_no: Mapped[str] = mapped_column(String(60))
+    po_date: Mapped[str | None] = mapped_column(String(10))
+    required_date: Mapped[str | None] = mapped_column(String(10))
+    category: Mapped[str] = mapped_column(String(40), default="")   # General / Freezer / 中央厨房
+    # confirmed partial shipped delivered closed cancelled
+    status: Mapped[str] = mapped_column(String(16), default="confirmed")
+    warehouse_id: Mapped[str | None] = mapped_column(ForeignKey("warehouses.id"), nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    exceptions: Mapped[list] = mapped_column(JSON, default=list)
+    source: Mapped[str] = mapped_column(String(40), default="manual")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = TS()
+    updated_at: Mapped[datetime] = TS()
+
+    @property
+    def title(self) -> str:
+        return f"{self.code} PO {self.po_no}"
+
+
+class SOLine(Base):
+    __tablename__ = "so_lines"
+    id: Mapped[str] = _id("sol")
+    order_id: Mapped[str] = mapped_column(ForeignKey("sales_orders.id"), index=True)
+    line_no: Mapped[int] = mapped_column(Integer)
+    item_no: Mapped[str] = mapped_column(String(40), default="")
+    description: Mapped[str] = mapped_column(String(300))
+    pack_size: Mapped[str] = mapped_column(String(60), default="")
+    order_unit: Mapped[str] = mapped_column(String(16), default="箱")
+    qty_ordered: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float, default=0)
+    sku_id: Mapped[str | None] = mapped_column(ForeignKey("skus.id"), nullable=True)
+    factor: Mapped[float] = mapped_column(Float, default=1.0)
+    catch_weight: Mapped[bool] = mapped_column(Boolean, default=False)  # 按实重计价（单位为磅）
+    qty_shipped: Mapped[float] = mapped_column(Float, default=0)   # 下单单位（称重行=磅）
+    boxes_shipped: Mapped[int] = mapped_column(Integer, default=0)
+    qty_rejected: Mapped[float] = mapped_column(Float, default=0)
+    reject_reason: Mapped[str] = mapped_column(String(300), default="")
+
+
+class Shipment(Base):
+    __tablename__ = "shipments"
+    id: Mapped[str] = _id("sh")
+    code: Mapped[str] = mapped_column(String(40), unique=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("sales_orders.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="shipped")  # shipped delivered
+    lines: Mapped[list] = mapped_column(JSON)  # [{line_id, qty, weight, boxes:[box ids], picks:[{lot_id, qty}]}]
+    posting_id: Mapped[str | None] = mapped_column(String(32))
+    shipped_by: Mapped[str] = mapped_column(String(32))
+    shipped_at: Mapped[datetime] = TS()
+    delivered_by: Mapped[str | None] = mapped_column(String(32))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    note: Mapped[str] = mapped_column(String(1000), default="")
+
+
+class Box(Base):
+    """称重箱：每箱一个标签（编号、SKU、Lot、重量）。库存按磅记在 Lot 上，箱子记录这些磅数装在哪几箱。"""
+    __tablename__ = "boxes"
+    id: Mapped[str] = _id("bx")
+    serial: Mapped[str] = mapped_column(String(40), unique=True)
+    sku_id: Mapped[str] = mapped_column(ForeignKey("skus.id"), index=True)
+    lot_id: Mapped[str | None] = mapped_column(ForeignKey("lots.id"), nullable=True)
+    warehouse_id: Mapped[str] = mapped_column(ForeignKey("warehouses.id"))
+    weight: Mapped[float] = mapped_column(Float)  # SKU 基本单位（磅）
+    status: Mapped[str] = mapped_column(String(16), default="in_stock")  # in_stock shipped void
+    shipment_id: Mapped[str | None] = mapped_column(String(32))
+    packed_by: Mapped[str] = mapped_column(String(32))
+    packed_at: Mapped[datetime] = TS()

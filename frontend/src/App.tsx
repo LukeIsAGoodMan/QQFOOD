@@ -35,6 +35,7 @@ function Routed() {
         <Route path="/quality" element={<PageByName match="质量" />} />
         <Route path="/inventory" element={<PageByName match="库存" />} />
         <Route path="/purchasing" element={<PageByName match="采购" />} />
+        <Route path="/orders" element={<PageByName match="订单" />} />
         <Route path="/admin/pages" element={<PagesAdmin />} />
         <Route path="/admin/schema" element={<Schema />} />
         <Route path="/admin/users" element={<Users />} />

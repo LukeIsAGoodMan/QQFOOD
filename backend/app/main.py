@@ -11,7 +11,7 @@ from .db import Base, engine
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 from .agent import oauth as agent_oauth, server as agent_server
-from .routers import admin, auth, batches, evidence, ingest, inventory, metrics, notebook, pages, purchasing, records, tasks
+from .routers import admin, auth, batches, evidence, ingest, inventory, metrics, notebook, orders, pages, purchasing, records, tasks
 
 def _ensure_columns():
     """Tiny forward-only migration for columns added after v0.1 (create_all does not alter tables)."""
@@ -19,6 +19,7 @@ def _ensure_columns():
     insp = inspect(engine)
     adds = {"users": [("agent_enabled", "BOOLEAN NOT NULL DEFAULT 0")],
             "warehouses": [("tracked", "BOOLEAN NOT NULL DEFAULT 1"), ("active", "BOOLEAN NOT NULL DEFAULT 1")],
+            "skus": [("catch_weight", "BOOLEAN NOT NULL DEFAULT 0")],
             "purchase_orders": [("doc_type", "VARCHAR(16) NOT NULL DEFAULT 'invoice'"), ("exceptions", "JSON NOT NULL DEFAULT '[]'"),
                                 ("quick", "BOOLEAN NOT NULL DEFAULT 0")]}
     with engine.begin() as conn:
@@ -52,6 +53,8 @@ async def lifespan(_app):
     seed_if_empty()
     upgrade_pages()
     upgrade_sources()
+    from .seed import upgrade_orders
+    upgrade_orders()
     _load_org_mode()
     yield
 
@@ -61,7 +64,7 @@ app = FastAPI(title="QQ Food 597 运营管理系统", version="0.3.0", lifespan=
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
-for r in (auth, pages, records, tasks, evidence, inventory, purchasing, batches, admin, notebook, ingest, metrics, agent_oauth, agent_server):
+for r in (auth, pages, records, tasks, evidence, inventory, purchasing, orders, batches, admin, notebook, ingest, metrics, agent_oauth, agent_server):
     app.include_router(r.router)
 
 

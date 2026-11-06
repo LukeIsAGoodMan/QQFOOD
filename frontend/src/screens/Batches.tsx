@@ -6,10 +6,10 @@ import { Badge, Empty, Field, Spinner, errMsg, useLoad, useToast } from '../comp
 
 const ACTION: Record<string, [string, string]> = {
   new: ['新增', 'green'], update: ['修改', 'blue'], set: ['设定数量', 'blue'], unchanged: ['无变化', 'gray'],
-  duplicate: ['疑似重复', 'yellow'], error: ['有错误', 'red'],
+  duplicate: ['疑似重复', 'yellow'], error: ['有错误', 'red'], mapped: ['已配对', 'green'], unmapped: ['未配对 SKU', 'yellow'],
 }
 const ST: Record<string, [string, string]> = { proposed: ['待确认', 'yellow'], applied: ['已全部应用', 'green'], partial: ['部分应用', 'green'], rejected: ['已驳回', 'gray'] }
-const selectable = (a: string) => ['new', 'update', 'set', 'duplicate'].includes(a)
+const selectable = (a: string) => ['new', 'update', 'set', 'duplicate', 'mapped', 'unmapped'].includes(a)
 const FIELD: Record<string, string> = { name: '名称', category: '分类', base_unit: '基本单位', conversions: '单位换算', barcode: '条码' }
 const fmtV = (v: any) => (v === null || v === undefined || v === '' ? '（空）' : typeof v === 'object' ? JSON.stringify(v) : String(v))
 
@@ -18,12 +18,15 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
   const { data: b, reload } = useLoad(() => get(`/api/batches/${id}`), [id])
   const [sel, setSel] = useState<Set<number>>(new Set())
   const [only, setOnly] = useState<'all' | 'issues'>('all')
-  useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set'].includes(r.action)).map((r: any) => r.index))) }, [b])
+  const [ov, setOv] = useState<Record<number, { sku_id: string; factor?: string }>>({})
+  const master = useLoad(() => (b?.kind === 'order' ? get('/api/inv/master') : Promise.resolve(null)), [b?.kind])
+  useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set', 'mapped', 'unmapped'].includes(r.action)).map((r: any) => r.index))) }, [b])
   if (!b) return <Spinner />
   const open = b.status === 'proposed'
   const toggle = (i: number) => { const n = new Set(sel); n.has(i) ? n.delete(i) : n.add(i); setSel(n) }
   const apply = async () => {
-    try { const r = await post(`/api/batches/${id}/apply`, { selected: [...sel] }); toast(`已应用 ${r.result.applied.length} 行`); reload(); onChanged() } catch (e) { toast(errMsg(e), 'err') }
+    const overrides = Object.fromEntries(Object.entries(ov).filter(([, v]) => v.sku_id).map(([k, v]) => [k, { sku_id: v.sku_id, factor: v.factor ? Number(v.factor) : undefined }]))
+    try { const r = await post(`/api/batches/${id}/apply`, { selected: [...sel], overrides }); toast(r.result.order_code ? `已建订单 ${r.result.order_code}` : `已应用 ${r.result.applied.length} 行`); reload(); onChanged() } catch (e) { toast(errMsg(e), 'err') }
   }
   const reject = async () => {
     const note = prompt('驳回原因（可空）')
@@ -40,6 +43,13 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
         <span className="text-xs text-slate-400">{b.created_by} · {dt(b.created_at)}</span>
       </div>
       {b.source_note && <div className="rounded bg-slate-50 p-2 text-sm text-slate-600">来源：{b.source_note}</div>}
+      {b.kind === 'order' && (
+        <dl className="kv rounded bg-slate-50 p-2">
+          <dt>PO 号</dt><dd className="font-mono font-semibold">{b.meta.po_no}</dd>
+          <dt>客户 / 送货点</dt><dd>{b.meta.customer || '大统华'} · {b.meta.site || '（未填）'}</dd>
+          <dt>下单 / 交货</dt><dd>{b.meta.po_date || '—'} → <b>{b.meta.required_date || '未填'}</b>{b.meta.category && ` · ${b.meta.category}`}</dd>
+        </dl>
+      )}
       {b.kind === 'inbound' && <div className="text-sm">从 <b>{b.meta.from_code}</b> 到 <b>{b.meta.to_code || 'WH597'}</b> · 预计 {b.meta.expected_date || '未定'}{b.meta.note && ` · ${b.meta.note}`}</div>}
       {b.kind === 'stock_count' && <div className="rounded bg-amber-50 p-2 text-xs text-amber-800">数量是<b>设定值</b>（盘点结果），不是增减。实盘写入实物；「估计」写入未核数，不算可用。{b.meta?.as_of && ` 数据日期 ${b.meta.as_of}`}</div>}
       <div className="flex flex-wrap gap-1.5">
@@ -62,6 +72,13 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
                 </div>
               )}
               {r.messages.map((m: string, i: number) => <div key={i} className={`mt-1 text-xs ${r.action === 'error' ? 'text-red-600' : 'text-amber-700'}`}>{m}</div>)}
+              {open && b.kind === 'order' && ['unmapped', 'new', 'mapped'].includes(r.action) && master.data && (r.action === 'unmapped' || ov[r.index]) && (
+                <div className="mt-1 flex gap-1" onClick={(e) => e.preventDefault()}>
+                  <select className="input min-w-0 flex-1" value={ov[r.index]?.sku_id || ''} onChange={(e) => setOv({ ...ov, [r.index]: { ...ov[r.index], sku_id: e.target.value } })}>
+                    <option value="">选我们的 SKU（可稍后在订单里配）</option>{master.data.skus.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}（{s.base_unit}）</option>)}</select>
+                  <input className="input w-20 shrink-0" type="number" inputMode="decimal" placeholder="换算×" value={ov[r.index]?.factor || ''} onChange={(e) => setOv({ ...ov, [r.index]: { ...ov[r.index], factor: e.target.value } })} />
+                </div>
+              )}
             </div>
           </label>
         ))}
@@ -73,7 +90,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
           <button className="btn-ghost" onClick={reject}><X size={16} />全部驳回</button>
         </div>
       ) : (
-        <div className="rounded bg-slate-50 p-2 text-xs text-slate-600">{b.decided_by} · {dt(b.decided_at)} 处理{b.result?.applied && `：应用 ${b.result.applied.length} 行`}{b.result?.transfer_code && `，生成调入单 ${b.result.transfer_code}`}{b.result?.note && ` · ${b.result.note}`}</div>
+        <div className="rounded bg-slate-50 p-2 text-xs text-slate-600">{b.decided_by} · {dt(b.decided_at)} 处理{b.result?.applied && `：应用 ${b.result.applied.length} 行`}{b.result?.transfer_code && `，生成调入单 ${b.result.transfer_code}`}{b.result?.order_code && `，生成订单 ${b.result.order_code}`}{b.result?.note && ` · ${b.result.note}`}</div>
       )}
     </div>
   )

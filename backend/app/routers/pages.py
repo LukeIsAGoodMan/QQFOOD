@@ -15,7 +15,7 @@ from ..templates import PAGE_TEMPLATES
 router = APIRouter(prefix="/api/pages", tags=["pages"])
 
 KNOWN_MODULES = {"metric", "table", "kanban", "form", "checklist", "evidence", "timeline", "text",
-                 "stock", "lots", "transfers", "production", "trace", "ingest", "purchasing", "requisitions"}
+                 "stock", "lots", "transfers", "production", "trace", "ingest", "purchasing", "requisitions", "orders", "boxes"}
 RECORD_SOURCED = {"table", "kanban", "form"}
 
 

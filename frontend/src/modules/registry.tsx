@@ -6,6 +6,7 @@ import { ChecklistModule } from './checklist'
 import { EvidenceModule, FormModule, IngestModule, KanbanModule, MetricModule, TableModule, TextModule, TimelineModule, type ModProps } from './basic'
 import { LotsModule, ProductionModule, StockModule, TraceModule, TransfersModule } from './inventory'
 import { PurchasingModule, RequisitionsModule } from './purchasing'
+import { BoxesModule, OrdersModule } from './orders'
 
 type Def = { label: string; group: string; description: string; Render: (p: ModProps) => ReactNode; defaults: () => any; width?: string }
 
@@ -25,6 +26,8 @@ export const MODULES: Record<string, Def> = {
   production: { label: '生产批次', group: '业务（专用）', description: '原料批次投入→成品批次（待放行）', Render: ProductionModule, defaults: () => ({}) },
   purchasing: { label: '采购单与收货', group: '业务（专用）', description: '审批、下单、按行收货入账、发票与付款核对', Render: PurchasingModule, defaults: () => ({}) },
   requisitions: { label: '需求与报价对比', group: '业务（专用）', description: '需求版本（余量）、报价对比、生成采购单', Render: RequisitionsModule, defaults: () => ({}) },
+  orders: { label: '客户订单与发货', group: '业务（专用）', description: 'PO 录入、配对 SKU、拣货/扫箱发货、签收与拒收', Render: OrdersModule, defaults: () => ({}) },
+  boxes: { label: '称重打标签', group: '业务（专用）', description: '每箱称重、打印标签（磅+箱）', Render: BoxesModule, defaults: () => ({}) },
   trace: { label: '追溯查询', group: '业务（专用）', description: '正向/反向追溯，导出 CSV', Render: TraceModule, defaults: () => ({}) },
 }
 

@@ -93,6 +93,8 @@ PERMS: dict[str, set[str]] = {
     "po.receive": {"warehouse", "ops_manager", "purchaser", "staff", "production"},
     "finance.reconcile": {"hr_finance", "boss"},
     "settings.purchasing": {"boss"},
+    "order.manage": {"ops_manager", "boss", "purchaser"},
+    "order.ship": {"warehouse", "ops_manager", "production"},
     "ingest.apply": {"boss", "ops_manager", "purchaser", "warehouse", "production", "quality", "hr_finance"},
 }
 
