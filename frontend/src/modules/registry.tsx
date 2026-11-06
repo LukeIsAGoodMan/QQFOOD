@@ -4,9 +4,10 @@ import { get } from '../lib/api'
 import { Field, useLoad } from '../components/ui'
 import { ChecklistModule } from './checklist'
 import { EvidenceModule, FormModule, IngestModule, KanbanModule, MetricModule, TableModule, TextModule, TimelineModule, type ModProps } from './basic'
-import { LotsModule, ProductionModule, StockModule, TraceModule, TransfersModule } from './inventory'
+import { LotsModule, StockModule, TraceModule, TransfersModule } from './inventory'
 import { PurchasingModule, RequisitionsModule } from './purchasing'
 import { BoxesModule, OrdersModule } from './orders'
+import { ProductionPlanModule } from './production'
 
 type Def = { label: string; group: string; description: string; Render: (p: ModProps) => ReactNode; defaults: () => any; width?: string }
 
@@ -23,7 +24,7 @@ export const MODULES: Record<string, Def> = {
   stock: { label: '多仓库存', group: '业务（专用）', description: '实物/隔离/预留/可用/在途/未核数，收货盘点出库', Render: StockModule, defaults: () => ({}) },
   transfers: { label: '调拨', group: '业务（专用）', description: '申请→发运→在途→签收→差异', Render: TransfersModule, defaults: () => ({}) },
   lots: { label: '批次隔离与放行', group: '业务（专用）', description: '质量状态、电子签名、标签打印', Render: LotsModule, defaults: () => ({}) },
-  production: { label: '生产批次', group: '业务（专用）', description: '原料批次投入→成品批次（待放行）', Render: ProductionModule, defaults: () => ({}) },
+  production: { label: '切配生产', group: '业务（专用）', description: '备料计划（出成率+箱规）、生产完工（投料、逐箱称重、损耗）、配方与规格', Render: ProductionPlanModule, defaults: () => ({}) },
   purchasing: { label: '采购单与收货', group: '业务（专用）', description: '审批、下单、按行收货入账、发票与付款核对', Render: PurchasingModule, defaults: () => ({}) },
   requisitions: { label: '需求与报价对比', group: '业务（专用）', description: '需求版本（余量）、报价对比、生成采购单', Render: RequisitionsModule, defaults: () => ({}) },
   orders: { label: '客户订单与发货', group: '业务（专用）', description: 'PO 录入、配对 SKU、拣货/扫箱发货、签收与拒收', Render: OrdersModule, defaults: () => ({}) },

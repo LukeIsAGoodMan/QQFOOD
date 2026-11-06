@@ -68,7 +68,9 @@ def _analyze_sku(db: Session, rows: list[dict]):
         cur = skus.get(code)
         if cur:
             want = {"name": r.get("name") or cur.name, "category": cat, "base_unit": r.get("base_unit") or cur.base_unit,
-                    "conversions": {**(cur.conversions or {}), **conv}, "barcode": r.get("barcode") if r.get("barcode") is not None else cur.barcode}
+                    "conversions": {**(cur.conversions or {}), **conv}, "barcode": r.get("barcode") if r.get("barcode") is not None else cur.barcode,
+                    "purchase_pack": r.get("purchase_pack") if r.get("purchase_pack") is not None else cur.purchase_pack,
+                    "ship_pack": r.get("ship_pack") if r.get("ship_pack") is not None else cur.ship_pack}
             for k, v in want.items():
                 if getattr(cur, k) != v:
                     res["changes"][k] = [getattr(cur, k), v]
@@ -92,7 +94,8 @@ def _analyze_sku(db: Session, rows: list[dict]):
             if twin:
                 res["messages"].append(f"疑似与已有 {twin.code} {twin.name} 重复（默认不勾选）")
             res["changes"] = {k: [None, v] for k, v in {"name": r.get("name"), "category": cat, "base_unit": r.get("base_unit") or "箱",
-                                                         "conversions": conv, "barcode": r.get("barcode")}.items() if v not in (None, {}, "")}
+                                                         "conversions": conv, "barcode": r.get("barcode"), "purchase_pack": r.get("purchase_pack"),
+                                                         "ship_pack": r.get("ship_pack")}.items() if v not in (None, {}, "")}
             for wc, q in (r.get("safety_stock") or {}).items():
                 res["changes"][f"安全库存@{str(wc).upper()}"] = [None, q]
         out.append(res)
@@ -362,15 +365,19 @@ def apply(bid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
             code = a["key"]
             sku = db.query(Sku).filter_by(code=code).first()
             if not sku:
-                sku = Sku(code=code, name=r["name"], category=r.get("category") or "原料", base_unit=r.get("base_unit") or "箱",
-                          conversions=r.get("conversions") or {}, barcode=r.get("barcode"))
+                bu = r.get("base_unit") or "箱"
+                sku = Sku(code=code, name=r["name"], category=r.get("category") or "原料", base_unit=bu,
+                          conversions=r.get("conversions") or {}, barcode=r.get("barcode"), purchase_pack=r.get("purchase_pack"),
+                          ship_pack=r.get("ship_pack"), catch_weight=bu in ("磅", "lb"))
                 db.add(sku)
                 db.flush()
             else:
                 ch = a["changes"]
-                for k in ("name", "category", "base_unit", "conversions", "barcode"):
+                for k in ("name", "category", "base_unit", "conversions", "barcode", "purchase_pack", "ship_pack"):
                     if k in ch:
                         setattr(sku, k, ch[k][1])
+                if sku.base_unit in ("磅", "lb"):
+                    sku.catch_weight = True
             for wc, q in (r.get("safety_stock") or {}).items():
                 w = whs[str(wc).upper()]
                 ss = db.query(SafetyStock).filter_by(sku_id=sku.id, warehouse_id=w.id).first()

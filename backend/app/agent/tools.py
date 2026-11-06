@@ -504,7 +504,8 @@ def _batch_reply(ctx, b, db):
 
 
 @tool("propose_skus", "批量提交 SKU", "批量新增或修改商品主档。rows 每行：code（编码，必填）、name、category（原料/包材/成品/耗材）、base_unit（基本单位，如 箱）、"
-      "conversions（{单位: 每个基本单位等于多少}，如 {\"磅\": 20}）、barcode、safety_stock（{仓库编码: 数量}）。不会直接生效。",
+      "conversions（{单位: 每个基本单位等于多少}，如 {\"磅\": 20}）、barcode、safety_stock（{仓库编码: 数量}）、"
+      "purchase_pack（供应商每箱多少基本单位，如鸡腿肉 40）、ship_pack（出货每箱目标量，如鸡丁 50）。称重品（肉、切粒）基本单位用“磅”。不会直接生效。",
       {"rows": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},
        "source_summary": {"type": "string", "description": "数据来源说明，如 “根据 11/3 库存表 v4 与邮件确认”"}},
       ["rows", "source_summary"], tier="propose")
@@ -600,3 +601,17 @@ def get_order(ctx, db, order):
     d["url"] = ctx.link(f"/orders?so={so.id}")
     d["note_for_ai"] = "发货、送达登记需要在工作台完成（称重扫箱、签收单）。改交期可用 propose_change(target_type='so')。"
     return d
+
+
+@tool("get_production_plan", "备料与生产计划", "按未发完的客户订单计算：每个成品要生产多少（扣掉成品库存）、按出成率需要多少原料、原料缺多少、"
+      "按供应商箱规建议买几箱（例：300 lb 鸡丁、出成率 95%、鸡腿肉 40 lb/箱 → 8 箱 320 lb），以及预计剩余（作损耗）。")
+def get_production_plan(ctx, db):
+    from ..routers import production as prod_r
+    d = prod_r.plan(None, ctx.user, db)
+    return {"outputs": [{"sku": o["sku"]["code"], "name": o["sku"]["name"], "demand": o["demand"], "finished_available": o["finished_available"],
+                         "to_make": o["to_make"], "boxes_suggested": o["boxes_suggested"], "ship_pack": o["sku"]["ship_pack"], "has_recipe": o["has_recipe"],
+                         "orders": o["orders"], "inputs": o["inputs"]} for o in d["outputs"]],
+            "materials": [{"sku": m["sku"]["code"], "name": m["sku"]["name"], "need": m["need"], "available": m["available"], "short": m["short"],
+                           "purchase_pack": m["sku"]["purchase_pack"], "suggest_cases": m["suggest_cases"], "suggest_qty": m["suggest_qty"],
+                           "expected_leftover": m["expected_leftover"]} for m in d["materials"]],
+            "url": ctx.link("/production"), "note": "配方/出成率与箱规在工作台「生产」页设置；生成采购单草稿也在那里一键完成。"}

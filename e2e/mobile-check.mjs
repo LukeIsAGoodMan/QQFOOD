@@ -489,6 +489,40 @@ let exceptionTaskId
   await page.context().close()
 }
 
+// ---------- 12. 切配生产：300 lb 咕咾肉 → 备料按 65 lb/箱买 5 箱 → 生成采购草稿 → 原料到货 → 生产完工（逐箱称重，剩余算损耗）----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => (await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined })).json(), [path, body, method])
+  const m = await api(page, '/api/inv/master')
+  const S = Object.fromEntries(m.skus.map((s) => [s.code, s.id])), W = Object.fromEntries(m.warehouses.map((w) => [w.code, w.id]))
+  const tnt = (await api(page, '/api/orders/customers')).find((c) => c.code === 'TNT')
+  await call('/api/orders', { customer_id: tnt.id, site_id: tnt.sites[0].id, po_no: 'CH-CK', po_date: '2026-11-07', required_date: '2026-11-11',
+    lines: [{ description: 'Pork Shoulder Butt-Diced 切粒咕咾肉', unit: 'lb', qty: 300, price: 3.68, sku_id: S['FG-PORK-DICE'] }] })
+  await page.goto(`${BASE}/production`); await page.waitForTimeout(1500)
+  await checkLayout(page, '生产 · 备料计划')
+  await shot(page, 'prd-01-plan')
+  ok('备料建议 梅头肉 5 箱 × 65 = 325 lb', await page.locator('text=5 箱 × 65 = 325').count() > 0)
+  await page.locator('input[placeholder="供应商（可空）"]').fill('梅头肉供应商')
+  await page.locator('button', { hasText: '生成采购单草稿' }).tap(); await page.waitForTimeout(1500)
+  ok('一键生成采购单草稿', new URL(page.url()).searchParams.get('po') !== null)
+  await call('/api/inv/receive', { idempotency_key: crypto.randomUUID(), sku_id: S['RM-PORK-BUTT'], warehouse_id: W['WH597'], qty: 325, lot_code: 'PORK-1107' })
+  await page.goto(`${BASE}/production`); await page.waitForTimeout(1500)
+  await page.locator('button', { hasText: '去生产' }).first().tap(); await page.waitForTimeout(900)
+  const dlg = page.locator('div[role=dialog]')
+  const inputs = dlg.locator('input[aria-label^="第"]')
+  const ws = ['50.2', '49.9', '50.1', '50.3', '49.8', '50.0']
+  for (let i = 0; i < ws.length; i++) await inputs.nth(i).fill(ws[i])
+  await checkLayout(page, '生产完工（称重）')
+  await shot(page, 'prd-02-run')
+  await dlg.locator('label:has-text("完工即放行") input').check()
+  await dlg.locator('button', { hasText: '完工并打印标签' }).tap(); await page.waitForTimeout(1200)
+  const runs = await api(page, '/api/production/runs')
+  const r = runs.find((x) => x.product_code === 'FG-PORK-DICE')
+  ok('生产记录：投入 325、产出 300.3、损耗 24.7', r && r.consumed_qty === 325 && r.output_qty === 300.3 && r.loss_qty === 24.7, r && `出成率 ${r.yield_pct}%`)
+  ok('完工后打印 6 箱标签', await page.locator('div[role=dialog]:has-text("箱标签（6）")').count() > 0)
+  await page.context().close()
+}
+
 await browser.close()
 const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} 通过；页面脚本错误 ${pageErrors.length} 个；截图在 e2e/screenshots/`)

@@ -91,7 +91,9 @@ def upgrade_orders():
         for p in db.query(Page).filter_by(name="生产"):
             mods = current(p)
             if not any(x["type"] == "boxes" for x in mods):
-                republish(p, [m("boxes", "称重打标签")] + mods, "系统升级：加入称重打标签")
+                i = next((k for k, x in enumerate(mods) if x["type"] == "production"), -1)
+                mods = [{**x, "title": "切配生产"} if x["type"] == "production" else x for x in mods]
+                republish(p, mods[:i + 1] + [m("boxes", "补打标签 / 单独称重")] + mods[i + 1:], "系统升级：切配生产（备料、损耗）与称重打标签")
         db.add(AppSetting(key="migration:orders_v1", value={"done": True}))
         db.commit()
     finally:
@@ -183,10 +185,16 @@ def seed_if_empty():
             "RM-SPICE": Sku(code="RM-SPICE", name="示例 香料包", category="原料", base_unit="箱", conversions={"包": 50}),
             "PK-TRAY": Sku(code="PK-TRAY", name="示例 包装托盘", category="包材", base_unit="箱"),
             "FG-SOUP": Sku(code="FG-SOUP", name="示例 成品汤料", category="成品", base_unit="箱"),
-            "FG-CHK-DICE": Sku(code="FG-CHK-DICE", name="示例 切粒鸡丁", category="成品", base_unit="磅", catch_weight=True),
+            "FG-CHK-DICE": Sku(code="FG-CHK-DICE", name="示例 切粒鸡丁", category="成品", base_unit="磅", catch_weight=True, ship_pack=50),
+            "FG-PORK-DICE": Sku(code="FG-PORK-DICE", name="示例 切粒咕咾肉", category="成品", base_unit="磅", catch_weight=True, ship_pack=50),
+            "RM-CHK-LEG": Sku(code="RM-CHK-LEG", name="示例 鸡腿肉（原料）", category="原料", base_unit="磅", catch_weight=True, purchase_pack=40),
+            "RM-PORK-BUTT": Sku(code="RM-PORK-BUTT", name="示例 梅头肉（原料）", category="原料", base_unit="磅", catch_weight=True, purchase_pack=65),
         }
         db.add_all(skus.values())
         db.flush()
+        from .models import Recipe
+        db.add(Recipe(output_sku_id=skus["FG-CHK-DICE"].id, lines=[{"sku_id": skus["RM-CHK-LEG"].id, "per_output": round(1 / 0.95, 6)}], note="示例：出成率 95%"))
+        db.add(Recipe(output_sku_id=skus["FG-PORK-DICE"].id, lines=[{"sku_id": skus["RM-PORK-BUTT"].id, "per_output": round(1 / 0.95, 6)}], note="示例：出成率 95%"))
         db.add(SafetyStock(sku_id=skus["RM-BEEF"].id, warehouse_id=wh597.id, qty=30))
         db.add(SafetyStock(sku_id=skus["FG-SOUP"].id, warehouse_id=wh597.id, qty=30))
         db.flush()
@@ -345,8 +353,8 @@ def seed_if_empty():
             m("stock", "多仓库存"), m("transfers", "调拨"),
         ]})
         page("生产", "factory", "业务", 14, {"modules": [
-            m("boxes", "称重打标签"),
-            m("production", "生产批次"),
+            m("production", "切配生产"),
+            m("boxes", "补打标签 / 单独称重"),
             m("lots", "批次质量状态", "full", category=None),
         ]})
         sanit = m("checklist", "开工卫生检查", daily_required=True, create_task_on_fail=True, items=[

@@ -250,6 +250,9 @@ class Sku(Base):
     conversions: Mapped[dict] = mapped_column(JSON, default=dict)  # {"磅": 20} => 1 base unit = 20 lb
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
     catch_weight: Mapped[bool] = mapped_column(Boolean, default=False)  # 称重品：基本单位为磅，每箱实重不同
+    # 包装规格只是参数，随时可改（换供应商、换箱子）；历史单据保留当时的数字
+    purchase_pack: Mapped[float | None] = mapped_column(Float, nullable=True)  # 采购：供应商每箱多少基本单位（如 鸡腿肉 40 磅/箱）
+    ship_pack: Mapped[float | None] = mapped_column(Float, nullable=True)      # 出货：每箱目标量（如 鸡丁 50 磅/箱）
 
 
 class SafetyStock(Base):
@@ -364,6 +367,13 @@ class ProductionBatch(Base):
     output_qty: Mapped[float] = mapped_column(Float)
     inputs: Mapped[list] = mapped_column(JSON)  # [{lot_id, sku_id, qty}]
     sop_ref: Mapped[str] = mapped_column(String(100), default="")
+    order_id: Mapped[str | None] = mapped_column(String(32), nullable=True)   # 为哪张客户订单生产
+    consumed_qty: Mapped[float | None] = mapped_column(Float, nullable=True)  # 原料投入合计（基本单位）
+    loss_qty: Mapped[float | None] = mapped_column(Float, nullable=True)      # 生产损耗 = 投入 − 产出
+    yield_pct: Mapped[float | None] = mapped_column(Float, nullable=True)     # 实际出成率
+    expected_yield_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    loss_reason: Mapped[str] = mapped_column(String(300), default="")
+    boxes: Mapped[int] = mapped_column(Integer, default=0)
     posting_id: Mapped[str] = mapped_column(String(32))
     created_by: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = TS()
@@ -788,3 +798,14 @@ class Box(Base):
     shipment_id: Mapped[str | None] = mapped_column(String(32))
     packed_by: Mapped[str] = mapped_column(String(32))
     packed_at: Mapped[datetime] = TS()
+
+
+class Recipe(Base):
+    """配方 / 出成率：一个成品由哪些原料做成。per_output = 每产出 1 个成品基本单位需要多少原料（= 1 / 出成率）。"""
+    __tablename__ = "recipes"
+    id: Mapped[str] = _id("rcp")
+    output_sku_id: Mapped[str] = mapped_column(ForeignKey("skus.id"), unique=True)
+    lines: Mapped[list] = mapped_column(JSON)  # [{sku_id, per_output}]
+    note: Mapped[str] = mapped_column(String(500), default="")
+    updated_by: Mapped[str | None] = mapped_column(String(32))
+    updated_at: Mapped[datetime] = TS()
