@@ -28,17 +28,17 @@ export function AliasManager({ skuId, onClose }: { skuId?: string; onClose: () =
     || (bySku[s.id] || []).some((a) => norm(a.code).includes(n) || norm(a.name).includes(n)))
   const sku = sel && master.data.skus.find((s: any) => s.id === sel)
   return (
-    <Modal open onClose={onClose} wide title={sku ? <button className="-ml-2 flex min-h-11 items-center gap-1 rounded px-2 hover:bg-slate-50" onClick={() => setSel(null)} aria-label="返回列表"><ArrowLeft size={18} />{sku.code}</button> : '商品对照（一物多码）'}>
+    <Modal open onClose={onClose} wide title={sku ? <button className="-ml-2 flex min-h-11 items-center gap-1 rounded px-2 hover:bg-slate-50" onClick={() => setSel(null)} aria-label="返回列表"><ArrowLeft size={18} />返回</button> : '商品对照（一物多码）'}>
       {sku ? <SkuAliases sku={sku} rows={bySku[sku.id] || []} onChanged={all.reload} /> : (
         <div className="space-y-3">
-          <p className="text-sm text-slate-600">库存只记<b>我们自己的 SKU</b>。大统华 Item#、外库（Supreme）代码、供应商编码、QuickBooks 品名都挂在对应 SKU 下面；单据进来时自动认出，确认页里选过一次的也会记住。</p>
-          <input className="input" type="search" placeholder="搜我们的编码、品名，或任何一方的编码（538949、Vatee-001…）" value={q} onChange={(e) => setQ(e.target.value)} />
+          <p className="text-sm text-slate-600">商品以<b>我们的品名</b>为主，大统华 Item# 作补充编号；库存只记这一个商品。大统华 Item#、外库（Supreme）代码、供应商编码、QuickBooks 品名都挂在对应 SKU 下面；单据进来时自动认出，确认页里选过一次的也会记住。</p>
+          <input className="input" type="search" placeholder="搜品名，或任何一方的编码（538949、Vatee-001…）" value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="space-y-2">
             {skus.map((s: any) => {
               const list = bySku[s.id] || []
               return (
                 <button key={s.id} className="w-full rounded-lg border border-slate-200 p-3 text-left hover:bg-slate-50" onClick={() => setSel(s.id)}>
-                  <div className="flex items-baseline gap-2"><span className="font-mono text-sm font-semibold">{s.code}</span><span className="min-w-0 flex-1 truncate">{s.name}</span><span className="text-xs text-slate-400">{s.base_unit}</span></div>
+                  <div className="flex items-baseline gap-2"><span className="min-w-0 flex-1 truncate font-semibold">{s.name}</span>{s.tnt_item_no && <span className="font-mono text-sm">T&amp;T {s.tnt_item_no}</span>}<span className="text-xs text-slate-400">{s.base_unit}</span></div>
                   <div className="mt-1 flex flex-wrap gap-1">
                     {list.map((a) => <Badge key={a.id} color={KIND_COLOR[a.party_kind]}>{SHORT[a.party_kind]} {a.party_kind === 'accounting' ? a.name || a.code : a.code || a.name}</Badge>)}
                     {!list.length && <span className="text-xs text-slate-400">还没有对照</span>}
@@ -73,7 +73,7 @@ function SkuAliases({ sku, rows, onChanged }: { sku: any; rows: Alias[]; onChang
   const opts = parties.data?.[f?.party_kind] || []
   return (
     <div className="space-y-3">
-      <div><div className="text-lg font-semibold">{sku.name}</div><div className="text-xs text-slate-500">我们的 SKU {sku.code} · 基本单位 {sku.base_unit} · 库存只记这个编码</div></div>
+      <div><div className="text-lg font-semibold">{sku.name}</div><div className="text-xs text-slate-500">{sku.tnt_item_no ? `大统华 Item# ${sku.tnt_item_no} · ` : '还没有大统华 Item#（看到 PO 会自动补上）· '}基本单位 {sku.base_unit} · 内部编号 {sku.code}</div></div>
       <div className="space-y-2">
         {rows.map((a) => (
           <div key={a.id} className="flex items-start gap-2 rounded-lg border border-slate-200 p-3 text-sm">

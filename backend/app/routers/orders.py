@@ -197,12 +197,47 @@ def upsert_mapping(db: Session, customer_id: str, body: ItemMapIn, price: float 
     if not ci:
         ci = CustomerItem(customer_id=customer_id, description=body.description)
         db.add(ci)
-    ci.item_no, ci.description, ci.pack_size, ci.order_unit = body.item_no.strip(), body.description, body.pack_size, unit
+    new_no = body.item_no.strip()
+    gained_no = bool(new_no) and not (ci.item_no or "").strip()
+    ci.item_no = new_no or ci.item_no or ""
+    ci.description, ci.pack_size, ci.order_unit = body.description, body.pack_size or ci.pack_size or "", unit
     ci.sku_id, ci.factor, ci.updated_at = sku.id, factor, _now()
     if price is not None:
         ci.last_price = price
     db.flush()
+    if gained_no:
+        backfill_item_no(db, customer_id, sku.id, new_no)
     return ci
+
+
+def backfill_item_no(db: Session, customer_id: str, sku_id: str, item_no: str) -> int:
+    """之前送货时还没有大统华 Item# 的行，看到 PO 后补上。"""
+    n = 0
+    for l in db.query(SOLine).join(SalesOrder, SalesOrder.id == SOLine.order_id).filter(
+            SalesOrder.customer_id == customer_id, SOLine.sku_id == sku_id, SOLine.item_no == ""):
+        l.item_no = item_no
+        n += 1
+    return n
+
+
+def set_tnt_item_no(db: Session, u: User, sku: Sku, item_no: str, tnt_name: str | None = None):
+    """商品主档里直接给的大统华 Item#：补到已有的（无 Item#）对照上，没有就新建。"""
+    tnt = db.query(Customer).filter_by(code="TNT").first()
+    if not tnt or not item_no:
+        return
+    ci = (db.query(CustomerItem).filter_by(customer_id=tnt.id, sku_id=sku.id, item_no="").first()
+          or db.query(CustomerItem).filter_by(customer_id=tnt.id, item_no=item_no).first())
+    if not ci:
+        ci = CustomerItem(customer_id=tnt.id, sku_id=sku.id, description=tnt_name or sku.name,
+                          order_unit="磅" if (sku.catch_weight or sku.base_unit in ("磅", "lb")) else "箱", factor=1.0)
+        db.add(ci)
+    had = (ci.item_no or "").strip()
+    ci.item_no, ci.sku_id, ci.updated_at = item_no, sku.id, _now()
+    if tnt_name:
+        ci.description = tnt_name
+    db.flush()
+    n = backfill_item_no(db, tnt.id, sku.id, item_no) if not had or had != item_no else 0
+    audit(db, u, "customer.item_mapped", "customer", tnt.id, item_no=item_no, sku=sku.code, backfilled=n)
 
 
 @router.post("/customers/{cid}/items")
@@ -229,7 +264,7 @@ class OLineIn(BaseModel):
 class OrderIn(BaseModel):
     customer_id: str
     site_id: str | None = None
-    po_no: str
+    po_no: str = ""
     po_date: str | None = None
     required_date: str | None = None
     category: str = ""
@@ -248,9 +283,8 @@ def duplicate_of(db: Session, customer_id: str, po_no: str, po_date: str | None,
 def create_order(db: Session, u: User, body: OrderIn, source: str = "manual") -> SalesOrder:
     require(u, "order.manage")
     cust = get_or_404(db, Customer, body.customer_id, "客户不存在")
-    if not body.po_no.strip():
-        raise HTTPException(400, "需要 PO 号")
-    dup = duplicate_of(db, cust.id, body.po_no, body.po_date, body.site_id)
+    # 没有 PO 也能先录（先送货、PO 后到），之后补 PO 号
+    dup = duplicate_of(db, cust.id, body.po_no, body.po_date, body.site_id) if body.po_no.strip() else None
     if dup:
         raise HTTPException(409, f"这张 PO 已录入：{dup.code}")
     if not body.lines:
@@ -275,6 +309,56 @@ def create_order(db: Session, u: User, body: OrderIn, source: str = "manual") ->
                                                   sku_id=sku.id, factor=factor), price=l.price)
     audit(db, u, "order.created", "so", so.id, po_no=so.po_no, lines=len(body.lines), source=source)
     return so
+
+
+def fill_order_from_po(db: Session, u: User, so: SalesOrder, body: OrderIn) -> list[str]:
+    """先送货、后到 PO：把 PO 号、日期、大统华 Item#、单价补到原订单上；按 SKU 对行，PO 多出来的行追加。返回需要人注意的差异。"""
+    require(u, "order.manage")
+    if so.po_no:
+        raise HTTPException(409, f"{so.code} 已有 PO 号 {so.po_no}")
+    if body.po_no.strip():
+        dup = duplicate_of(db, so.customer_id, body.po_no, body.po_date, so.site_id)
+        if dup and dup.id != so.id:
+            raise HTTPException(409, f"这张 PO 已录入：{dup.code}")
+    so.po_no, so.po_date = body.po_no.strip(), body.po_date or so.po_date
+    so.required_date = so.required_date or body.required_date
+    so.category = so.category or body.category
+    lines = db.query(SOLine).filter_by(order_id=so.id).order_by(SOLine.line_no).all()
+    used, notes, next_no = set(), [], len(lines) + 1
+    for pl in body.lines:
+        unit = norm_unit(pl.unit)
+        hit = next((l for l in lines if l.id not in used and pl.sku_id and l.sku_id == pl.sku_id), None)
+        sku = db.get(Sku, pl.sku_id) if pl.sku_id else None
+        if hit:
+            used.add(hit.id)
+            hit.item_no = pl.item_no.strip() or hit.item_no
+            hit.pack_size = pl.pack_size or hit.pack_size
+            if pl.price and abs(pl.price - hit.price) > 1e-6:
+                if hit.price:
+                    notes.append(f"{hit.description}：单价 {hit.price:g} → PO {pl.price:g}")
+                hit.price = pl.price
+            if abs(pl.qty - hit.qty_ordered) > 1e-6:
+                notes.append(f"{hit.description}：送货单 {hit.qty_ordered:g} {hit.order_unit}，PO {pl.qty:g} {unit}（订量改为 PO 数）")
+                hit.qty_ordered = pl.qty
+        else:
+            factor = pl.factor or (default_factor(sku, unit) if sku else 1.0) or 1.0
+            db.add(SOLine(order_id=so.id, line_no=next_no, item_no=pl.item_no.strip(), description=pl.description, pack_size=pl.pack_size,
+                          order_unit=unit, qty_ordered=pl.qty, price=pl.price, sku_id=sku.id if sku else None, factor=factor,
+                          catch_weight=is_catch(sku, unit)))
+            next_no += 1
+            notes.append(f"PO 多了一行：{pl.description} {pl.qty:g} {unit}（已追加，待发）")
+        if sku:
+            upsert_mapping(db, so.customer_id, ItemMapIn(item_no=pl.item_no, description=pl.description, pack_size=pl.pack_size,
+                                                         order_unit=unit, sku_id=sku.id, factor=pl.factor), price=pl.price)
+    for l in lines:
+        if l.id not in used:
+            notes.append(f"送货单上的「{l.description}」PO 里没有")
+    if so.status in ("shipped", "delivered") and any(l.qty_shipped + 1e-9 < l.qty_ordered for l in db.query(SOLine).filter_by(order_id=so.id)):
+        so.status = "partial"
+    so.version += 1
+    so.updated_at = _now()
+    audit(db, u, "order.po_filled", "so", so.id, po_no=so.po_no, notes=notes)
+    return notes
 
 
 @router.post("")
@@ -383,6 +467,8 @@ def get_order(oid: str, u: User = Depends(current_user), db: Session = Depends(g
 
 class OrderPatch(BaseModel):
     version: int
+    po_no: str | None = None
+    po_date: str | None = None
     required_date: str | None = None
     note: str | None = None
     warehouse_id: str | None = None
@@ -393,7 +479,12 @@ def apply_order_patch(db: Session, u: User, so: SalesOrder, body: OrderPatch, vi
     if body.version != so.version:
         raise HTTPException(409, {"msg": "订单已被他人修改，请刷新", "current_version": so.version})
     changed = {}
-    for k in ("required_date", "note", "warehouse_id"):
+    if body.po_no is not None and body.po_no.strip() and body.po_no.strip() != so.po_no:
+        dup = duplicate_of(db, so.customer_id, body.po_no, body.po_date or so.po_date, so.site_id)
+        if dup and dup.id != so.id:
+            raise HTTPException(409, f"这张 PO 已录入：{dup.code}")
+        body.po_no = body.po_no.strip()
+    for k in ("po_no", "po_date", "required_date", "note", "warehouse_id"):
         v = getattr(body, k)
         if v is not None and v != getattr(so, k):
             changed[k] = [getattr(so, k), v]

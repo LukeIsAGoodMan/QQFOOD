@@ -97,18 +97,23 @@ def posting_out(db: Session, p: InventoryPosting, duplicate=False):
 # ---------- master data ----------
 @router.get("/master")
 def master(u: User = Depends(current_user), db: Session = Depends(get_db)):
+    from ..models import Customer, CustomerItem
+    t = db.query(Customer).filter_by(code="TNT").first()
+    tnt = {}
+    for ci in (db.query(CustomerItem).filter(CustomerItem.customer_id == t.id, CustomerItem.item_no != "").order_by(CustomerItem.updated_at) if t else []):
+        tnt.setdefault(ci.sku_id, ci.item_no)
     return {
         "warehouses": [{"id": w.id, "code": w.code, "name": w.name, "kind": w.kind, "tracked": w.tracked, "active": w.active}
                        for w in db.query(Warehouse).order_by(Warehouse.tracked.desc(), Warehouse.name)],
         "skus": [{"id": s.id, "code": s.code, "name": s.name, "category": s.category, "base_unit": s.base_unit,
-                  "conversions": s.conversions, "barcode": s.barcode} for s in db.query(Sku).order_by(Sku.code)],
+                  "conversions": s.conversions, "barcode": s.barcode, "tnt_item_no": tnt.get(s.id, "")} for s in db.query(Sku).order_by(Sku.name)],
         "lots": [{"id": l.id, "sku_id": l.sku_id, "lot_code": l.lot_code, "expiry": l.expiry,
                   "quality_status": l.quality_status} for l in db.query(Lot).order_by(Lot.lot_code)],
     }
 
 
 class SkuIn(BaseModel):
-    code: str
+    code: str = ""  # 可空：以品名为主，系统自动编号
     name: str
     category: str = "原料"
     base_unit: str = "箱"
@@ -119,6 +124,10 @@ class SkuIn(BaseModel):
 @router.post("/skus")
 def create_sku(body: SkuIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
     require(u, "inventory.master")
+    from .batches import _norm, next_sku_code
+    if any(_norm(x.name) == _norm(body.name) for x in db.query(Sku)):
+        raise HTTPException(409, f"已有同名商品「{body.name}」")
+    body.code = body.code.strip().upper() or next_sku_code(db)
     if db.query(Sku).filter_by(code=body.code).first():
         raise HTTPException(409, "SKU 编码已存在")
     s = Sku(**body.model_dump())

@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api", tags=["ingest"])
 
 TASK_FIELDS = {"title": "标题", "description": "说明", "due_at": "截止时间", "next_step": "下一步", "status": "状态"}
 PO_FIELDS = {"expected_date": "预计到货", "note": "备注"}
-SO_FIELDS = {"required_date": "要求交货日期", "note": "备注"}
+SO_FIELDS = {"po_no": "PO 号（补录）", "po_date": "PO 日期", "required_date": "要求交货日期", "note": "备注"}
 
 
 def _so_model():

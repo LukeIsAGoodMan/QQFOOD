@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { AlertTriangle, Check, FileSignature, PackageCheck, Plus, Receipt, Send, ShoppingCart, Trash2, X } from 'lucide-react'
 import { get, patch, post, put } from '../lib/api'
 import { useAuth } from '../lib/auth'
-import { dt, num } from '../lib/fmt'
+import { dt, num, skuLabel } from '../lib/fmt'
 import { Badge, Empty, Field, Modal, Segmented, Spinner, errMsg, useLoad, useToast } from '../components/ui'
 import { EvidencePanel, PickButtons, UploadQueue, useUploader } from '../components/Evidence'
 import { ScanButton } from '../components/Scan'
@@ -53,7 +53,7 @@ function NewPO({ onClose, onCreated, limit }: { onClose: () => void; onCreated: 
           <div key={i} className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 p-2 sm:grid-cols-[2fr_1.5fr_1fr_1fr_auto]">
             <select className="input col-span-2 sm:col-span-1" value={l.sku_id} onChange={(e) => setLine(i, { sku_id: e.target.value })}>
               <option value="">非库存品（设备/服务）</option>
-              {skus.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}
+              {skus.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}
             </select>
             {l.sku_id ? <div className="col-span-2 flex items-center text-xs text-slate-500 sm:col-span-1">收货后自动入库</div>
               : <input className="input col-span-2 sm:col-span-1" placeholder="品名，如 研磨机" value={l.item_name} onChange={(e) => setLine(i, { item_name: e.target.value })} />}
@@ -114,7 +114,7 @@ function QuickPurchase({ limit, onClose, onDone, onOpen }: { limit: number; onCl
           {lines.map((l, i) => (
             <div key={i} className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 p-2 sm:grid-cols-[1.5fr_2fr_1fr_1fr]">
               <select className="input col-span-2 sm:col-span-1" value={l.sku_id} onChange={(e) => setLine(i, { sku_id: e.target.value })}>
-                <option value="">不入库存</option>{(master.data?.skus || []).map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}
+                <option value="">不入库存</option>{(master.data?.skus || []).map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}
               </select>
               <input className="input col-span-2 sm:col-span-1" placeholder={l.sku_id ? '（品名取自 SKU）' : '品名，如 垃圾袋'} disabled={!!l.sku_id} value={l.item_name} onChange={(e) => setLine(i, { item_name: e.target.value })} />
               <label><span className="label">数量</span><input className="input" type="number" inputMode="decimal" placeholder="数量" value={l.qty} onChange={(e) => setLine(i, { qty: e.target.value })} /></label>
@@ -470,7 +470,7 @@ function ReqForm({ initial, title, onClose, onSave }: { initial?: any; title: st
       <div className="mt-3 space-y-2">
         {f.lines.map((l: any, i: number) => (
           <div key={i} className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 p-2 sm:grid-cols-[2fr_1.5fr_1fr_1fr]">
-            <select className="input col-span-2 sm:col-span-1" value={l.sku_id || ''} onChange={(e) => setLine(i, { sku_id: e.target.value })}><option value="">非库存品</option>{skus.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select>
+            <select className="input col-span-2 sm:col-span-1" value={l.sku_id || ''} onChange={(e) => setLine(i, { sku_id: e.target.value })}><option value="">非库存品</option>{skus.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select>
             <input className="input col-span-2 sm:col-span-1" placeholder="品名" value={l.item_name} onChange={(e) => setLine(i, { item_name: e.target.value })} />
             <input className="input" type="number" inputMode="decimal" placeholder="基础数量" value={l.base_qty} onChange={(e) => setLine(i, { base_qty: e.target.value })} />
             <input className="input" placeholder="单位" value={l.unit} onChange={(e) => setLine(i, { unit: e.target.value })} />

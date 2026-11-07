@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { ChevronDown, ChevronRight, Download, PackageCheck, Plus, Printer, ShieldAlert, ShieldCheck, Tags, Truck, Warehouse } from 'lucide-react'
 import { ApiError, get, post, uuid } from '../lib/api'
 import { useAuth } from '../lib/auth'
-import { ago, dt, num } from '../lib/fmt'
+import { ago, dt, num, skuLabel } from '../lib/fmt'
 import { t } from '../lib/i18n'
 import { Badge, Empty, ErrorBox, Field, LOT_COLOR, LOT_LABEL, Modal, Spinner, errMsg, useLoad, useToast } from '../components/ui'
 import { EvidencePanel } from '../components/Evidence'
@@ -50,7 +50,7 @@ function ReceiveDialog({ master, onClose, onDone }: { master: any; onClose: () =
       ) : (
         <div className="space-y-3">
           <ScanButton onResult={scan} />
-          <Field label="SKU"><select className="input" value={f.sku_id} onChange={(e) => setF({ ...f, sku_id: e.target.value, unit: '' })}><option value="">—</option>{master.skus.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select></Field>
+          <Field label="SKU"><select className="input" value={f.sku_id} onChange={(e) => setF({ ...f, sku_id: e.target.value, unit: '' })}><option value="">—</option>{master.skus.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select></Field>
           <Field label="仓库"><select className="input" value={f.warehouse_id} onChange={(e) => setF({ ...f, warehouse_id: e.target.value })}>{master.warehouses.filter((w: any) => w.tracked && w.active).map((w: any) => <option key={w.id} value={w.id}>{w.name}</option>)}</select></Field>
           <Field label="货从哪来"><select className="input" value={f.source_kind} onChange={(e) => setF({ ...f, source_kind: e.target.value })}>
             <option value="po">采购到货</option><option value="company">公司调入（多伦多、温哥华等）</option><option value="other">其他（退货、样品、期初…）</option></select></Field>
@@ -307,7 +307,7 @@ function NewTransfer({ master, onClose, onDone }: any) {
       <div className="mt-3 space-y-2">
         {f.lines.map((l: any, i: number) => (
           <div key={i} className="grid grid-cols-2 gap-2 rounded-lg border border-slate-100 p-2 sm:grid-cols-[2fr_1.5fr_1fr] sm:border-0 sm:p-0 [&>select:first-child]:col-span-2 sm:[&>select:first-child]:col-span-1">
-            <select className="input" value={l.sku_id} onChange={(e) => setLine(i, { sku_id: e.target.value, lot_id: '' })}><option value="">SKU</option>{master.skus.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select>
+            <select className="input" value={l.sku_id} onChange={(e) => setLine(i, { sku_id: e.target.value, lot_id: '' })}><option value="">SKU</option>{master.skus.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select>
             {inbound
               ? <label><span className="label sm:hidden">Lot</span><input className="input" placeholder="Lot（按对方单据填写）" value={l.lot_code} onChange={(e) => setLine(i, { lot_code: e.target.value })} /></label>
               : <select className="input" value={l.lot_id} onChange={(e) => setLine(i, { lot_id: e.target.value })}><option value="">(无批次)</option>{master.lots.filter((x: any) => x.sku_id === l.sku_id).map((x: any) => <option key={x.id} value={x.id}>{x.lot_code}</option>)}</select>}
@@ -535,7 +535,7 @@ function NewBatch({ master, onClose, onDone }: any) {
   return (
     <Modal open onClose={onClose} wide title="生产完工登记" footer={<button className="btn-primary" onClick={save}>{t('common.submit')}</button>}>
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="成品 SKU"><select className="input" value={f.product_sku_id} onChange={(e) => setF({ ...f, product_sku_id: e.target.value })}><option value="">—</option>{products.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select></Field>
+        <Field label="成品 SKU"><select className="input" value={f.product_sku_id} onChange={(e) => setF({ ...f, product_sku_id: e.target.value })}><option value="">—</option>{products.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select></Field>
         <Field label="成品批次号"><input className="input" value={f.output_lot_code} onChange={(e) => setF({ ...f, output_lot_code: e.target.value })} /></Field>
         <Field label="产出数量（箱）"><input className="input" type="number" value={f.output_qty} onChange={(e) => setF({ ...f, output_qty: e.target.value })} /></Field>
         <Field label="配方/SOP 版本"><input className="input" placeholder="例如 SOP-切肉 v3" value={f.sop_ref} onChange={(e) => setF({ ...f, sop_ref: e.target.value })} /></Field>

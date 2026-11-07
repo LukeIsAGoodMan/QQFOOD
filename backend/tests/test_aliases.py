@@ -153,3 +153,56 @@ def test_ALS03_manual_transfer_from_tracked_source_shortfall(client, login):
     ok = client.post(f"/api/inv/transfers/{t['id']}/ship", json={"idempotency_key": K(), "lines": [{"line_id": line, "qty": 5}],
                                                                   "shortfall_reason": "外库实际有货，报表未更新"}, headers=ops)
     assert ok.status_code == 200 and "例外" in ok.json()["transfer"]["note"]
+
+
+def test_ALS04_name_first_deliver_without_po_then_fill(client, login):
+    """以品名为主：商品可以只有品名；先送货（没有 PO、没有大统华 Item#），PO 到了再补到原单上。"""
+    ops = login("ops")
+    enable(client, login, "ops")
+    _, tok = connect(client, "ops")
+    res = call(client, tok, "propose_skus", {"source_summary": "库存表", "rows": [
+        {"name": "芋头地瓜丸", "category": "成品", "base_unit": "箱"},
+        {"name": "红糖小米糕", "category": "成品", "base_unit": "箱", "tnt_item_no": "777001", "tnt_name": "BROWN SUGAR MILLET CAKE"}]})["structuredContent"]
+    assert res["summary"] == {"new": 2}
+    client.post(f"/api/batches/{res['confirm_url'].split('batch=')[1]}/apply", json={"selected": [0, 1]}, headers=ops)
+    m = {s["name"]: s for s in master(client, ops)["skus"]}
+    taro, cake = m["芋头地瓜丸"], m["红糖小米糕"]
+    assert taro["code"].startswith("QQ-") and cake["tnt_item_no"] == "777001" and taro["tnt_item_no"] == ""
+    # same name again without a code → updates the existing product, adds the T&T number later
+    again = call(client, tok, "propose_skus", {"source_summary": "补 Item#", "rows": [{"name": "芋头地瓜丸", "tnt_item_no": "538956"}]})["structuredContent"]
+    assert again["summary"] == {"update": 1}
+    client.post(f"/api/batches/{again['confirm_url'].split('batch=')[1]}/reject", json={}, headers=ops)  # 先不补，等 PO
+    # stock + a delivery with no PO and no Item#: matched by our name
+    w = {x["code"]: x["id"] for x in master(client, ops)["warehouses"]}
+    client.post("/api/inv/receive", json={"idempotency_key": K(), "sku_id": taro["id"], "warehouse_id": w["WH597"], "qty": 20, "lot_code": "TARO1"}, headers=ops)
+    d = call(client, tok, "propose_order", {"site": "Chino Hills", "required_date": "2026-11-07", "source_summary": "先送货，PO 未到",
+                                            "lines": [{"description": "芋头地瓜丸", "unit": "case", "qty": 5, "price": 0}]})["structuredContent"]
+    assert d["summary"] == {"mapped": 1} and any("没有 PO 号" in " ".join(x["note"]) for x in d["warnings"])
+    r = client.post(f"/api/batches/{d['confirm_url'].split('batch=')[1]}/apply", json={"selected": [0]}, headers=ops).json()
+    oid = r["result"]["order_id"]
+    so = client.get(f"/api/orders/{oid}", headers=ops).json()
+    assert so["po_no"] == "" and so["lines"][0]["item_no"] == ""
+    client.post(f"/api/orders/{oid}/ship", json={"idempotency_key": K(), "lines": [{"line_id": so["lines"][0]["id"], "qty": 5}]}, headers=ops)
+    # PO arrives (bilingual line, like T&T's) → matched by name, offered to fill the earlier delivery
+    po = call(client, tok, "propose_order", {"po_no": "623031000", "po_date": "2026-11-08", "site": "Chino Hills", "source_summary": "PO 到了",
+                                             "lines": [{"item_no": "538956", "description": "TARO & SWEET POTATO PASTE BALLS 芋头地瓜丸", "unit": "case", "qty": 5, "price": 60},
+                                                       {"item_no": "777001", "description": "BROWN SUGAR MILLET CAKE", "unit": "case", "qty": 2, "price": 40}]})["structuredContent"]
+    assert po["summary"] == {"mapped": 2}
+    assert any(c["code"] == so["code"] for c in po["possible_earlier_delivery"])
+    bid = po["confirm_url"].split("batch=")[1]
+    assert any(c["id"] == oid for c in client.get(f"/api/batches/{bid}", headers=ops).json()["fill_candidates"])
+    r = client.post(f"/api/batches/{bid}/apply", json={"selected": [0, 1], "fill_order_id": oid}, headers=ops).json()
+    assert r["result"]["order_id"] == oid and any("PO 多了一行" in n for n in r["result"]["fill_notes"])
+    so = client.get(f"/api/orders/{oid}", headers=ops).json()
+    assert so["po_no"] == "623031000" and so["lines"][0]["item_no"] == "538956" and so["lines"][0]["price"] == 60
+    assert so["status"] == "partial" and len(so["lines"]) == 2  # 小米糕 still to ship
+    assert {s["name"]: s["tnt_item_no"] for s in master(client, ops)["skus"]}["芋头地瓜丸"] == "538956"
+    # manual: type the PO number onto an order later
+    d2 = client.post("/api/orders", json={"customer_id": so["customer_id"], "lines": [{"description": "芋头地瓜丸", "qty": 1, "sku_id": taro["id"]}]}, headers=ops).json()
+    o2 = client.get(f"/api/orders/{d2['id']}", headers=ops).json()
+    p = client.patch(f"/api/orders/{d2['id']}", json={"version": o2["version"], "po_no": "623031001"}, headers=ops).json()
+    assert p["po_no"] == "623031001"
+    assert client.patch(f"/api/orders/{d2['id']}", json={"version": p["version"], "po_no": "623031000"}, headers=ops).status_code == 409
+    # documents from a 3PL / Toronto with only a name are recognised too
+    inb = call(client, tok, "propose_inbound", {"from_code": "TOR", "source_summary": "装箱单", "lines": [{"party_name": "红糖小米糕", "qty": 3}]})["structuredContent"]
+    assert inb["summary"] == {"new": 1}

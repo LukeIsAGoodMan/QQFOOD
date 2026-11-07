@@ -86,6 +86,28 @@ def find_alias(db: Session, kind: str, party: str | None, code=None, name=None, 
     return None
 
 
+def match_sku_by_name(db: Session, text) -> tuple[Sku | None, str]:
+    """以品名为主：先找品名完全一致（我们的品名或任何一方记过的品名），再找“单据品名里含我们的品名”且唯一的。
+    返回 (SKU, 方式)：exact / contains。"""
+    n = norm_text(text)
+    if len(n) < 2:
+        return None, ""
+    skus = db.query(Sku).all()
+    hit = next((s for s in skus if norm_text(s.name) == n), None)
+    if hit:
+        return hit, "exact"
+    names = [(a.sku_id, a.name) for a in db.query(SkuAlias) if a.name] + [(c.sku_id, c.description) for c in db.query(CustomerItem) if c.description]
+    ids = {sid for sid, nm in names if norm_text(nm) == n}
+    if len(ids) == 1:
+        return db.get(Sku, ids.pop()), "exact"
+    inside = [s for s in skus if len(norm_text(s.name)) >= 2 and norm_text(s.name) in n]
+    if inside:
+        best = max(inside, key=lambda s: len(norm_text(s.name)))
+        if sum(1 for s in inside if len(norm_text(s.name)) == len(norm_text(best.name))) == 1:
+            return best, "contains"
+    return None, ""
+
+
 def resolve_row(db: Session, r: dict, kind: str, party: str, skus: dict[str, Sku]) -> dict:
     """一行单据 → 我们的 SKU。顺序：我们的编码 → 该来源的对照（编码、品名）→ 其他来源的唯一同码对照。"""
     sc = _code(r.get("sku_code"))
@@ -100,6 +122,13 @@ def resolve_row(db: Session, r: dict, kind: str, party: str, skus: dict[str, Sku
         hits = [x for x in db.query(SkuAlias) if x.code and _code(x.code) == _code(pcode)]
         if len({x.sku_id for x in hits}) == 1:
             return {"sku": db.get(Sku, hits[0].sku_id), "how": "alias_other", "alias": hits[0]}
+        ci = {c.sku_id for c in db.query(CustomerItem) if c.item_no and _code(c.item_no) == _code(pcode)}
+        if len(ci) == 1:  # 单据上写的是大统华 Item#
+            return {"sku": db.get(Sku, ci.pop()), "how": "alias_other_ci", "alias": None}
+    for t in (pname, r.get("name")):
+        sku, how = match_sku_by_name(db, t)
+        if sku:
+            return {"sku": sku, "how": "name_" + how, "alias": None}
     return {"sku": None, "how": None, "alias": None}
 
 

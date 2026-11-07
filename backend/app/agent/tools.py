@@ -38,7 +38,7 @@ INSTRUCTIONS = (
     "8) 库存、SKU 以工作台为唯一账本：先用 get_master_data / get_stock 读取现状，再用 propose_skus / propose_stock_counts / "
     "propose_inbound 批量提交（每批 ≤300 行，SKU 先于库存）；它们都只生成待确认批次，必须让用户打开 confirm_url 确认。"
     "不要再单独维护另一份库存表。"
-    "9) 一物多码：库存只记我们自己的 SKU。大统华 Item#、外库（如 Supreme：Vatee-001）、供应商编码、QuickBooks 品名都是“对照”，"
+    "9) 一物多码：商品以品名为主（我们自己的叫法），大统华 Item# 作为补充编号；内部编码可以不给，系统自动编号。库存只记我们自己的商品。大统华 Item#、外库（如 Supreme：Vatee-001）、供应商编码、QuickBooks 品名都是“对照”，"
     "不要为它们新建 SKU。先用 list_item_aliases 查；没有就用 propose_item_aliases 提交对照。外库 BOL / 调货单用 propose_inbound，"
     "行里直接填对方的 party_code / party_name，系统会按对照换成我们的 SKU，对不上的由用户在确认页选一次并记住。"
 )
@@ -510,10 +510,13 @@ def _batch_reply(ctx, b, db):
             "summary_legend": {"new": "新增", "update": "修改", "set": "将设定数量", "unchanged": "无变化", "duplicate": "疑似重复（默认不勾）", "error": "有错误（不能确认）",
                                "mapped": "已按对照对上", "unmapped": "未对上我们的 SKU（用户在确认页选一次即记住）"},
             "errors": errs, "warnings": warns, "confirm_url": ctx.link(f"/ingest?batch={b.id}"),
-            "message": "已提交为待确认批次，尚未生效。请用户打开 confirm_url 勾选确认。若有错误行，可修正后另提一批。"}
+            "message": "已提交为待确认批次，尚未生效。请用户打开 confirm_url 勾选确认。若有错误行，可修正后另提一批。",
+            **({"possible_earlier_delivery": [{k: c[k] for k in ("code", "required_date", "lines")} for c in d["fill_candidates"]],
+                "note_for_ai": "有之前没填 PO 的送货单，可能就是这张 PO 的货；告诉用户在确认页选择“补到该单”。"} if d.get("fill_candidates") else {})}
 
 
-@tool("propose_skus", "批量提交 SKU", "批量新增或修改商品主档。rows 每行：code（编码，必填）、name、category（原料/包材/成品/耗材）、base_unit（基本单位，如 箱）、"
+@tool("propose_skus", "批量提交 SKU", "批量新增或修改商品主档，以品名为主。rows 每行：name（我们的品名，必填）、tnt_item_no（大统华 Item#，有就填，没有留空，以后看到 PO 再补）、"
+      "tnt_name（大统华品名，可空）、code（内部编码，可空=自动编号；按品名找已有商品，同名即修改）、category（原料/包材/成品/耗材）、base_unit（基本单位，如 箱）、"
       "conversions（{单位: 每个基本单位等于多少}，如 {\"磅\": 20}）、barcode、safety_stock（{仓库编码: 数量}）、"
       "purchase_pack（供应商每箱多少基本单位，如鸡腿肉 40）、ship_pack（出货每箱目标量，如鸡丁 50）。称重品（肉、切粒）基本单位用“磅”。不会直接生效。",
       {"rows": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},
@@ -602,7 +605,8 @@ def list_customers(ctx, db, customer=None):
                           for r in rows]}
 
 
-@tool("propose_order", "录入客户订单（PO）", "把一张客户 PO（大统华 PO 的 PDF/照片/邮件）录成待确认订单。一张 PO 调用一次；一个 PDF 里有多张 PO（如 General、Freezer）就分别调用。"
+@tool("propose_order", "录入客户订单（PO）/ 送货单", "把一张客户 PO（大统华 PO 的 PDF/照片/邮件）录成待确认订单。一张 PO 调用一次；一个 PDF 里有多张 PO（如 General、Freezer）就分别调用。"
+      "还没有 PO 先送货的，po_no 留空、按我们的品名录（description 写品名，没有 Item# 就不填）；PO 到了再调用一次并填上 po_no，确认页会提示“补到之前那张送货单”，Item# 自动补上。"
       "meta：customer（默认大统华）、site（送货点，如 Chino Hills Kitchen Deli）、po_no、po_date、required_date（Delivery Date / Date Required，YYYY-MM-DD）、category（General/Freezer/中央厨房）。"
       "lines 每行：item_no（客户 Item#，有就填）、description（用英文品名；PDF 里乱码的中文行忽略）、pack_size、unit（case=箱，lb=磅）、qty、price（单价）、sku_code（如能判断我们对应的 SKU）。"
       "不会直接生效：返回 confirm_url 给用户确认，以及 upload_url 让用户上传 PO 原件。",
@@ -610,9 +614,9 @@ def list_customers(ctx, db, customer=None):
        "required_date": {"type": "string"}, "category": {"type": "string"}, "note": {"type": "string"},
        "lines": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "object"}},
        "source_summary": {"type": "string", "description": "来源，如 “11/5 邮件 PO 623030105 PDF 第 1 页”"}},
-      ["po_no", "lines", "source_summary"], tier="propose")
-def propose_order(ctx, db, po_no, lines, source_summary, customer=None, site=None, po_date=None, required_date=None, category="", note=""):
-    meta = {"customer": customer or "TNT", "site": site, "po_no": po_no, "po_date": (po_date or "")[:10] or None,
+      ["lines", "source_summary"], tier="propose")
+def propose_order(ctx, db, lines, source_summary, po_no="", customer=None, site=None, po_date=None, required_date=None, category="", note=""):
+    meta = {"customer": customer or "TNT", "site": site, "po_no": (po_no or "").strip(), "po_date": (po_date or "")[:10] or None,
             "required_date": (required_date or "")[:10] or None, "category": category, "note": note}
     b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="order", rows=lines, meta=meta, source_note=source_summary), source=f"agent:{ctx.client}")
     db.commit()

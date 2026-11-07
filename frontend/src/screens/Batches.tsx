@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Bot, Check, X } from 'lucide-react'
 import { ApiError, get, post } from '../lib/api'
-import { dt } from '../lib/fmt'
+import { dt, skuLabel } from '../lib/fmt'
 import { Badge, Empty, Field, Spinner, errMsg, useLoad, useToast } from '../components/ui'
 
 const ACTION: Record<string, [string, string]> = {
@@ -21,8 +21,10 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
   const [ov, setOv] = useState<Record<number, { sku_id: string; factor?: string }>>({})
   const [reason, setReason] = useState('')
   const [askReason, setAskReason] = useState(false)
+  const [fill, setFill] = useState<string | null>(null)
   const pickable = ['order', 'inbound', 'stock_count'].includes(b?.kind)
   const master = useLoad(() => (pickable ? get('/api/inv/master') : Promise.resolve(null)), [pickable])
+  useEffect(() => { setFill(b?.fill_candidates?.[0]?.id ?? null) }, [b?.fill_candidates])
   useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set', 'mapped', 'unmapped'].includes(r.action)).map((r: any) => r.index))) }, [b])
   if (!b) return <Spinner />
   const open = b.status === 'proposed'
@@ -30,8 +32,8 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
   const apply = async () => {
     const overrides = Object.fromEntries(Object.entries(ov).filter(([, v]) => v.sku_id).map(([k, v]) => [k, { sku_id: v.sku_id, factor: v.factor ? Number(v.factor) : undefined }]))
     try {
-      const r = await post(`/api/batches/${id}/apply`, { selected: [...sel], overrides, shortfall_reason: reason })
-      toast(r.result.order_code ? `已建订单 ${r.result.order_code}` : r.result.transfer_code ? `已建调入单 ${r.result.transfer_code}` : `已应用 ${r.result.applied.length} 行`); reload(); onChanged()
+      const r = await post(`/api/batches/${id}/apply`, { selected: [...sel], overrides, shortfall_reason: reason, fill_order_id: fill })
+      toast(r.result.fill_notes ? `已补到 ${r.result.order_code}` : r.result.order_code ? `已建订单 ${r.result.order_code}` : r.result.transfer_code ? `已建调入单 ${r.result.transfer_code}` : `已应用 ${r.result.applied.length} 行`); reload(); onChanged()
     } catch (e) {
       if (e instanceof ApiError && e.detail?.code === 'source_short') setAskReason(true)
       toast(errMsg(e), 'err')
@@ -55,10 +57,20 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
       {b.source_note && <div className="rounded bg-slate-50 p-2 text-sm text-slate-600">来源：{b.source_note}</div>}
       {b.kind === 'order' && (
         <dl className="kv rounded bg-slate-50 p-2">
-          <dt>PO 号</dt><dd className="font-mono font-semibold">{b.meta.po_no}</dd>
+          <dt>PO 号</dt><dd className="font-mono font-semibold">{b.meta.po_no || <span className="font-sans font-normal text-amber-700">待补（先按送货单录）</span>}</dd>
           <dt>客户 / 送货点</dt><dd>{b.meta.customer || '大统华'} · {b.meta.site || '（未填）'}</dd>
           <dt>下单 / 交货</dt><dd>{b.meta.po_date || '—'} → <b>{b.meta.required_date || '未填'}</b>{b.meta.category && ` · ${b.meta.category}`}</dd>
         </dl>
+      )}
+      {open && b.kind === 'order' && b.fill_candidates?.length > 0 && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm">
+          <div className="font-medium text-blue-900">之前有没填 PO 的送货单，这张 PO 是给它补的吗？</div>
+          <p className="mt-0.5 text-xs text-blue-800">选「补到这张」：PO 号、大统华 Item#、单价补到原单上，已发的货不重复；PO 多出来的行追加待发。</p>
+          <select className="input mt-2" value={fill || ''} onChange={(e) => setFill(e.target.value || null)}>
+            {b.fill_candidates.map((c: any) => <option key={c.id} value={c.id}>补到 {c.code}（{c.required_date || '无交期'} · {c.status_label}）：{c.lines}</option>)}
+            <option value="">不是，新建一张订单</option>
+          </select>
+        </div>
       )}
       {b.kind === 'inbound' && <div className="text-sm">从 <b>{b.meta.from_code}</b> 到 <b>{b.meta.to_code || 'WH597'}</b> · 预计 {b.meta.expected_date || '未定'}{b.meta.note && ` · ${b.meta.note}`}</div>}
       {b.kind === 'alias_upsert' && <div className="rounded bg-slate-50 p-2 text-xs text-slate-600">把各方的编码 / 品名对到<b>我们自己的 SKU</b>，不新建 SKU。确认后，单据进来时自动认出。</div>}
@@ -76,7 +88,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
             {open && <input type="checkbox" className="mt-1 shrink-0" disabled={!selectable(r.action)} checked={sel.has(r.index)} onChange={() => toggle(r.index)} />}
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-slate-400">#{r.index + 1}</span><span className="font-medium">{r.key || '—'}</span>
-                <Badge color={ACTION[r.action][1]}>{ACTION[r.action][0]}</Badge>{r.input?.name && b.kind === 'sku_upsert' && <span className="text-xs text-slate-500">{r.input.name}</span>}</div>
+                <Badge color={ACTION[r.action][1]}>{ACTION[r.action][0]}</Badge>{b.kind === 'sku_upsert' && r.code && <span className="text-xs text-slate-500">{r.code}</span>}</div>
               {Object.keys(r.changes || {}).length > 0 && (
                 <div className="mt-1 space-y-0.5 text-xs">
                   {Object.entries(r.changes).map(([k, v]: any) => <div key={k}><span className="text-slate-400">{FIELD[k] || k}：</span>{v[0] !== null && <span className="text-slate-400 line-through">{fmtV(v[0])}</span>} → <b>{fmtV(v[1])}</b>{r.unit && ['实物', '未核数', '未核数（估计）', '在途'].includes(k) && ` ${r.unit}`}</div>)}
@@ -86,7 +98,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
               {open && pickable && ['unmapped', 'new', 'mapped', 'set'].includes(r.action) && master.data && (r.action === 'unmapped' || ov[r.index]) && (
                 <div className="mt-1 flex gap-1" onClick={(e) => e.preventDefault()}>
                   <select className="input min-w-0 flex-1" value={ov[r.index]?.sku_id || ''} onChange={(e) => setOv({ ...ov, [r.index]: { ...ov[r.index], sku_id: e.target.value } })}>
-                    <option value="">{b.kind === 'order' ? '选我们的 SKU（可稍后在订单里配）' : '选我们的 SKU（确认后记住）'}</option>{master.data.skus.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}（{s.base_unit}）</option>)}</select>
+                    <option value="">{b.kind === 'order' ? '选我们的 SKU（可稍后在订单里配）' : '选我们的 SKU（确认后记住）'}</option>{master.data.skus.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select>
                   <input className="input w-20 shrink-0" type="number" inputMode="decimal" placeholder="换算×" value={ov[r.index]?.factor || ''} onChange={(e) => setOv({ ...ov, [r.index]: { ...ov[r.index], factor: e.target.value } })} />
                 </div>
               )}
@@ -108,7 +120,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
           <button className="btn-ghost" onClick={reject}><X size={16} />全部驳回</button>
         </div>
       ) : (
-        <div className="rounded bg-slate-50 p-2 text-xs text-slate-600">{b.decided_by} · {dt(b.decided_at)} 处理{b.result?.applied && `：应用 ${b.result.applied.length} 行`}{b.result?.transfer_code && `，生成调入单 ${b.result.transfer_code}`}{b.result?.order_code && `，生成订单 ${b.result.order_code}`}{b.result?.note && ` · ${b.result.note}`}</div>
+        <div className="rounded bg-slate-50 p-2 text-xs text-slate-600">{b.decided_by} · {dt(b.decided_at)} 处理{b.result?.applied && `：应用 ${b.result.applied.length} 行`}{b.result?.transfer_code && `，生成调入单 ${b.result.transfer_code}`}{b.result?.order_code && (b.result.fill_notes ? `，补到订单 ${b.result.order_code}` : `，生成订单 ${b.result.order_code}`)}{b.result?.fill_notes?.length > 0 && `（${b.result.fill_notes.join('；')}）`}{b.result?.note && ` · ${b.result.note}`}</div>
       )}
     </div>
   )

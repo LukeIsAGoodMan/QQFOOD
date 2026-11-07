@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Factory, Plus, ShoppingCart, Trash2 } from 'lucide-react'
 import { get, patch, post, put, uuid } from '../lib/api'
 import { useAuth } from '../lib/auth'
-import { dt, num } from '../lib/fmt'
+import { dt, num, skuLabel } from '../lib/fmt'
 import { Badge, Empty, Field, LOT_COLOR, LOT_LABEL, Modal, Segmented, Spinner, errMsg, useLoad, useToast } from '../components/ui'
 import { BoxLabels } from './orders'
 import type { ModProps } from './basic'
@@ -57,9 +57,9 @@ function RunDialog({ init, setup, onClose, onDone }: { init: { sku_id?: string; 
     <Modal open onClose={onClose} wide title="生产完工（切配 / 分包 / 腌制）" footer={<button className="btn-primary" disabled={!skuId || !produced || !consumed} onClick={submit}><Factory size={16} />完工并{catchW ? '打印标签' : '入库'}</button>}>
       <div className="space-y-4">
         <div className="grid gap-2 sm:grid-cols-3">
-          <Field label="做的是什么（成品）"><select className="input" value={skuId} onChange={(e) => setSkuId(e.target.value)}><option value="">选择…</option>{setup.skus.filter((s: any) => s.category === '成品' || setup.recipes.some((r: any) => r.output_sku_id === s.id)).map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select></Field>
+          <Field label="做的是什么（成品）"><select className="input" value={skuId} onChange={(e) => setSkuId(e.target.value)}><option value="">选择…</option>{setup.skus.filter((s: any) => s.category === '成品' || setup.recipes.some((r: any) => r.output_sku_id === s.id)).map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select></Field>
           <Field label="成品批次号"><input className="input" value={lotCode} onChange={(e) => setLotCode(e.target.value)} /></Field>
-          <Field label="用什么原料"><select className="input" value={inputSku} onChange={(e) => setInputSku(e.target.value)}><option value="">选择…</option>{setup.skus.filter((s: any) => s.id !== skuId).map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select></Field>
+          <Field label="用什么原料"><select className="input" value={inputSku} onChange={(e) => setInputSku(e.target.value)}><option value="">选择…</option>{setup.skus.filter((s: any) => s.id !== skuId).map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select></Field>
         </div>
         {init.target && <div className="rounded bg-sky-50 p-2 text-sm text-sky-800">订单需要 {num(init.target)} {u(out?.base_unit)}{out?.ship_pack && `，按 ${out.ship_pack} ${u(out.base_unit)}/箱 约 ${Math.ceil(init.target / out.ship_pack)} 箱`}</div>}
         <div>
@@ -203,7 +203,7 @@ function Setup({ setup, reload }: { setup: any; reload: () => void }) {
             </div>
             <div className="text-sm font-semibold">如果这是成品：用什么原料、出成率多少</div>
             <div className="grid grid-cols-[1fr_100px] gap-2">
-              <select className="input" value={edit.raw} onChange={(e) => setEdit({ ...edit, raw: e.target.value })}><option value="">（不是成品 / 不设）</option>{setup.skus.filter((x: any) => x.id !== edit.sku.id).map((x: any) => <option key={x.id} value={x.id}>{x.code} {x.name}</option>)}</select>
+              <select className="input" value={edit.raw} onChange={(e) => setEdit({ ...edit, raw: e.target.value })}><option value="">（不是成品 / 不设）</option>{setup.skus.filter((x: any) => x.id !== edit.sku.id).map((x: any) => <option key={x.id} value={x.id}>{skuLabel(x)}</option>)}</select>
               <input className="input" type="number" inputMode="decimal" placeholder="出成率%" value={edit.yield} onChange={(e) => setEdit({ ...edit, yield: e.target.value })} />
             </div>
             <p className="text-xs text-slate-500">例：鸡腿肉切丁出成率 95% → 300 lb 鸡丁需要约 316 lb 鸡腿肉，按 40 lb/箱买 8 箱。</p>
