@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 CONFIRM = "清空演示数据"
 # delete order respects foreign keys
 BUSINESS_TABLES = [
-    "boxes", "shipments", "so_lines", "sales_orders", "customer_items", "recipes",
+    "boxes", "shipments", "so_lines", "sales_orders", "customer_items", "sku_aliases", "recipes",
     "inventory_txns", "inventory_postings", "reservations", "transfer_lines", "transfers", "production_batches",
     "quality_events", "po_lines", "receipts", "purchase_orders", "quotes", "requisition_versions", "requisitions",
     "safety_stock", "lots", "skus", "change_sets", "ingest_items", "evidence_links", "evidence_versions", "evidence",

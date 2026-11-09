@@ -229,6 +229,11 @@ def search(q: str, u: User = Depends(current_user), db: Session = Depends(get_db
         out.append({"type": "contact", "id": c.id, "title": c.name, "sub": c.company, "link": "/notebook?tab=contacts"})
     for a in db.query(AccountEntry).filter(AccountEntry.service.ilike(like)).limit(20):
         out.append({"type": "account", "id": a.id, "title": a.service, "sub": a.category, "link": "/notebook"})
+    from .aliases import lookup
+    for h in lookup(db, q)[:20]:  # 我们的 SKU，也可用外库 / 大统华 / 供应商 / QuickBooks 的编码或品名搜到
+        via = "；".join(f"{v['party']} {v['code'] or v['name']}" for v in h["via"][:2])
+        out.append({"type": "sku", "id": h["sku"]["id"], "title": f"{h['sku']['code']} {h['sku']['name']}", "sub": via or "商品",
+                    "link": f"/inventory?sku={h['sku']['id']}"})
     from ..core import can_read_evidence
     for e in db.query(Evidence).filter(Evidence.title.ilike(like)).limit(40):
         if can_read_evidence(u, e.sensitivity):

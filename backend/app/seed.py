@@ -59,6 +59,20 @@ def ensure_tnt(db):
     return c
 
 
+def upgrade_aliases():
+    """一次性：加 Supreme Logistics 外库（在本系统管账）。已有名字含 Supreme 的仓库则不重复加。"""
+    db = SessionLocal()
+    try:
+        if not db.query(User).count() or db.get(AppSetting, "migration:aliases_v1"):
+            return
+        if not any("supreme" in (w.code + w.name).lower() for w in db.query(Warehouse)):
+            db.add(Warehouse(code="SUPREME", name="Supreme 外库", kind="external", tracked=True))
+        db.add(AppSetting(key="migration:aliases_v1", value={"done": True}))
+        db.commit()
+    finally:
+        db.close()
+
+
 def upgrade_orders():
     """一次性：已上线库加大统华客户、订单页换成订单模块（旧模块隐藏）、老板总览加订单指标、生产页加称重打标签。"""
     db = SessionLocal()

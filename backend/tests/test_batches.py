@@ -45,7 +45,7 @@ def test_BAT02_opening_stock_counted_and_estimated(client, login):
         {"sku_code": "NOPE", "qty": 1},
         {"sku_code": "TT-DUMPLING", "warehouse_code": "TOR", "qty": 5},                                         # untracked
     ]})["structuredContent"]
-    assert res["summary"] == {"set": 3, "error": 2}
+    assert res["summary"] == {"set": 3, "unmapped": 1, "error": 1}  # 不认识的编码 → 确认页选一次 SKU
     bid = res["confirm_url"].split("batch=")[1]
     client.post(f"/api/batches/{bid}/apply", json={"selected": [0, 1, 2, 3, 4]}, headers=ops)
     s597 = stock(client, ops, "TT-DUMPLING")
@@ -67,7 +67,7 @@ def test_BAT03_inbound_from_toronto(client, login):
                                                  "source_summary": "多伦多 11/4 邮件装箱单", "lines": [
                                                      {"sku_code": "TT-DUMPLING", "lot_code": "TOR-D1", "qty": 100},
                                                      {"sku_code": "GHOST", "qty": 3}]})["structuredContent"]
-    assert res["summary"] == {"new": 1, "error": 1}
+    assert res["summary"] == {"new": 1, "unmapped": 1}
     before = stock(client, ops, "TT-DUMPLING")["in_transit"]
     bid = res["confirm_url"].split("batch=")[1]
     r = client.post(f"/api/batches/{bid}/apply", json={"selected": [0]}, headers=ops).json()

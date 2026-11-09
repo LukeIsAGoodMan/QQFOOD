@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import QRCode from 'qrcode'
-import { AlertTriangle, Plus, Printer, Scale, Send, Trash2, Truck, Users } from 'lucide-react'
+import { AlertTriangle, Download, FileSpreadsheet, Plus, Printer, Scale, Send, Trash2, Truck, Users } from 'lucide-react'
 import { get, patch, post, uuid } from '../lib/api'
 import { useAuth } from '../lib/auth'
-import { dt, num } from '../lib/fmt'
+import { dt, num, skuLabel, poLabel } from '../lib/fmt'
 import { Badge, Empty, Field, Modal, Segmented, Spinner, errMsg, useLoad, useToast } from '../components/ui'
 import { EvidencePanel } from '../components/Evidence'
 import { ScanButton } from '../components/Scan'
@@ -74,7 +74,7 @@ export function BoxesModule({ preview }: ModProps) {
         <div className="space-y-3 rounded-lg border border-slate-200 p-3">
           {!cw.length && <div className="rounded bg-amber-50 p-2 text-xs text-amber-800">还没有称重品。称重品的 SKU 基本单位需为「磅」（可让 ChatGPT 用 propose_skus 设置，或在 SKU 里改）。</div>}
           <div className="grid gap-2 sm:grid-cols-3">
-            <Field label="品项（称重品）"><select className="input" value={f.sku_id} onChange={(e) => setF({ ...f, sku_id: e.target.value })}><option value="">选择…</option>{cw.map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select></Field>
+            <Field label="品项（称重品）"><select className="input" value={f.sku_id} onChange={(e) => setF({ ...f, sku_id: e.target.value })}><option value="">选择…</option>{cw.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select></Field>
             <Field label="Lot（生产/切配批次）"><input className="input" value={f.lot_code} onChange={(e) => setF({ ...f, lot_code: e.target.value })} placeholder="如 CK1106" /></Field>
             <Field label="到期日"><input className="input" type="date" value={f.expiry} onChange={(e) => setF({ ...f, expiry: e.target.value })} /></Field>
           </div>
@@ -123,7 +123,7 @@ function PackingSlip({ so, shipment, onClose }: { so: any; shipment?: any; onClo
       <div className="print-area mx-auto max-w-3xl space-y-3 bg-white p-4 text-sm text-black">
         <div className="flex justify-between">
           <div><div className="text-lg font-bold">Q&Q FOODS USA INC.</div><div>597 Monterey Pass Rd, Monterey Park, CA</div>{so.vendor_no && <div>Vendor # {so.vendor_no}</div>}</div>
-          <div className="text-right"><div className="text-lg font-bold">PACKING SLIP</div><div>PO No.: <b>{so.po_no}</b></div><div>{shipment ? shipment.code : so.code}</div><div>Date: {dt(shipment?.shipped_at || new Date().toISOString(), { dateOnly: true })}</div></div>
+          <div className="text-right"><div className="text-lg font-bold">PACKING SLIP</div><div>PO No.: <b>{so.po_no || '—'}</b></div><div>{shipment ? shipment.code : so.code}</div><div>Date: {dt(shipment?.shipped_at || new Date().toISOString(), { dateOnly: true })}</div></div>
         </div>
         <div><b>Ship to:</b> {so.site_detail?.name || so.site}{so.site_detail?.address && `, ${so.site_detail.address}`}{so.site_detail?.dept && ` · ${so.site_detail.dept}`}</div>
         <table className="w-full border-collapse text-xs">
@@ -167,7 +167,7 @@ function ShipDialog({ so, onClose, onDone }: { so: any; onClose: () => void; onD
     } catch (e: any) { toast(errMsg(e), 'err') }
   }
   return (
-    <Modal open onClose={onClose} wide title={`发货：PO ${so.po_no}`} footer={<button className="btn-primary" onClick={submit}><Truck size={16} />确认发货</button>}>
+    <Modal open onClose={onClose} wide title={`发货：${poLabel(so.po_no)}`} footer={<button className="btn-primary" onClick={submit}><Truck size={16} />确认发货</button>}>
       <div className="space-y-3">
         {open.some((l: any) => l.catch_weight) && <ScanButton label="扫箱标签" onResult={scan} />}
         {open.map((l: any) => {
@@ -239,7 +239,7 @@ function SkuPicker({ onPick }: { onPick: (id: string, factor?: number) => void }
   const [factor, setFactor] = useState('')
   return (
     <div className="mt-1 flex flex-wrap gap-1">
-      <select className="input min-w-0 flex-1" value={id} onChange={(e) => setId(e.target.value)}><option value="">选我们的 SKU…</option>{(master.data?.skus || []).map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}（{s.base_unit}）</option>)}</select>
+      <select className="input min-w-0 flex-1" value={id} onChange={(e) => setId(e.target.value)}><option value="">选我们的 SKU…</option>{(master.data?.skus || []).map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select>
       <input className="input w-24" type="number" inputMode="decimal" placeholder="换算×" value={factor} onChange={(e) => setFactor(e.target.value)} title="每个下单单位等于多少个 SKU 基本单位；同单位留空" />
       <button className="btn-secondary btn-sm" disabled={!id} onClick={() => onPick(id, factor ? Number(factor) : undefined)}>配对</button>
     </div>
@@ -259,14 +259,20 @@ export function OrderDetail({ id, onClose, onChanged }: { id: string; onClose: (
     if (v === null) return
     try { await patch(`/api/orders/${id}`, { version: so.version, required_date: v }); reload() } catch (e) { toast(errMsg(e), 'err') }
   }
+  const fillPo = async () => {
+    const v = prompt('大统华 PO 号（PO 原件发给 ChatGPT 录入时，会自动补 Item# 与单价）')
+    if (!v?.trim()) return
+    try { await patch(`/api/orders/${id}`, { version: so.version, po_no: v.trim() }); reload() } catch (e) { toast(errMsg(e), 'err') }
+  }
   const openish = ['confirmed', 'partial'].includes(so.status)
   return (
-    <Modal open onClose={onClose} wide title={<span className="flex flex-wrap items-center gap-2">PO {so.po_no}<Badge color={ST_COLOR[so.status]}>{so.status_label}</Badge>{so.overdue && <Badge color="red">已过交期</Badge>}{so.due_soon && <Badge color="yellow">即将到期</Badge>}</span>}>
+    <Modal open onClose={onClose} wide title={<span className="flex flex-wrap items-center gap-2">{poLabel(so.po_no)}<Badge color={ST_COLOR[so.status]}>{so.status_label}</Badge>{so.overdue && <Badge color="red">已过交期</Badge>}{so.due_soon && <Badge color="yellow">即将到期</Badge>}</span>}>
       <div className="space-y-4 pb-16 sm:pb-0">
         <dl className="kv">
           <dt>客户</dt><dd>{so.customer}{so.vendor_no && <span className="text-xs text-slate-400"> · 供应商号 {so.vendor_no}</span>}</dd>
           <dt>送货点</dt><dd>{so.site || <span className="text-amber-700">未指定</span>}</dd>
           <dt>交货</dt><dd className={so.overdue ? 'font-semibold text-red-600' : ''}>{so.required_date || '未定'} {so.can.manage && openish && <button className="btn-ghost btn-sm text-brand-700" onClick={changeDate}>修改</button>}</dd>
+          <dt>PO</dt><dd>{so.po_no ? <span className="font-mono">{so.po_no}</span> : <span className="text-amber-700">待补（先送货的单）</span>} {so.can.manage && !so.po_no && <button className="btn-ghost btn-sm text-brand-700" onClick={fillPo}>补 PO 号</button>}</dd>
           <dt>下单</dt><dd>{so.po_date || '—'}{so.category && ` · ${so.category}`} · {so.code}</dd>
           <dt>金额</dt><dd><b>{money(so.total)}</b> · 已发 {money(so.shipped_amount)}</dd>
           {so.note && <><dt>备注</dt><dd className="whitespace-pre-wrap">{so.note}</dd></>}
@@ -309,12 +315,69 @@ export function OrderDetail({ id, onClose, onChanged }: { id: string; onClose: (
       <div className="sticky bottom-0 -mx-4 -mb-4 flex gap-2 overflow-x-auto border-t bg-white px-4 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] [&>button]:shrink-0">
         {openish && so.can.ship && <button className="btn-primary" onClick={() => setDlg({ t: 'ship' })}><Truck size={16} />发货</button>}
         <button className="btn-secondary" onClick={() => setDlg({ t: 'slip' })}><Printer size={16} />打印发货单</button>
+        {so.can.manage && so.shipped_amount > 0 && <button className="btn-secondary" onClick={() => setDlg({ t: 'qb' })}><FileSpreadsheet size={16} />QuickBooks 发票</button>}
         {openish && so.can.manage && so.shipments.length > 0 && <button className="btn-ghost" onClick={() => { const r = prompt('结案原因（剩余不再发，记得通知客户）'); if (r) act('close', { reason: r }) }}>按已发结案</button>}
         {openish && so.can.manage && !so.shipments.length && <button className="btn-ghost text-red-600" onClick={() => { const r = prompt('取消原因'); if (r) act('cancel', { reason: r }) }}>取消订单</button>}
       </div>
       {dlg?.t === 'ship' && <ShipDialog so={so} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.t === 'slip' && <PackingSlip so={so} shipment={dlg.s} onClose={() => setDlg(null)} />}
+      {dlg?.t === 'qb' && <QuickBooksDialog so={so} onClose={() => setDlg(null)} />}
       {dlg?.t === 'deliver' && <DeliverDialog so={so} shipment={dlg.s} onClose={() => setDlg(null)} onDone={reload} />}
+    </Modal>
+  )
+}
+
+// ---------------- QuickBooks 发票导出 ----------------
+const laToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })
+
+function QuickBooksDialog({ so, onClose }: { so: any; onClose: () => void }) {
+  const toast = useToast()
+  const others = useLoad(() => get('/api/orders?status=partial,shipped,delivered,closed'), [])
+  const [picked, setPicked] = useState<Set<string>>(new Set([so.id]))
+  const [f, setF] = useState({ invoice_no: `QQUSA${laToday().replaceAll('-', '')}`, invoice_date: laToday(), terms: 'Net 30', customer_name: so.customer_accounting_name, basis: 'shipped' })
+  const [res, setRes] = useState<any>(null)
+  const same = (others.data || []).filter((o: any) => o.customer_id === so.customer_id && o.shipped_amount > 0).slice(0, 30)
+  const toggle = (id: string) => { const n = new Set(picked); n.has(id) ? n.delete(id) : n.add(id); setPicked(n); setRes(null) }
+  const go = async () => { try { setRes(await post('/api/orders/quickbooks', { ...f, order_ids: [...picked] })) } catch (e) { toast(errMsg(e), 'err') } }
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([res.csv], { type: 'text/csv;charset=utf-8' }))
+    const a = document.createElement('a')
+    a.href = url; a.download = res.filename; document.body.appendChild(a); a.click(); a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+  }
+  return (
+    <Modal open onClose={onClose} title="导出 QuickBooks 发票" footer={res
+      ? <button className="btn-primary" onClick={download}><Download size={16} />下载 {res.filename}</button>
+      : <button className="btn-primary" disabled={!picked.size || !f.invoice_no.trim()} onClick={go}>生成</button>}>
+      <div className="space-y-3 text-sm">
+        <p className="text-xs text-slate-500">生成 QuickBooks Online「导入发票」用的 CSV：商品用 QuickBooks 品名（在「商品对照」里设），描述里带客户的 Item#。导入：QuickBooks ⚙ 设置 → 导入数据 → 发票。</p>
+        <div>
+          <div className="mb-1 font-medium">合并到这张发票的订单（同一客户）</div>
+          <div className="max-h-48 space-y-1 overflow-y-auto">
+            {same.map((o: any) => (
+              <label key={o.id} className="flex min-h-11 items-center gap-2 rounded border border-slate-200 px-2">
+                <input type="checkbox" checked={picked.has(o.id)} onChange={() => toggle(o.id)} />
+                <span className="font-mono">{poLabel(o.po_no)}</span><span className="min-w-0 flex-1 truncate text-xs text-slate-500">{o.site} · {o.status_label}</span><span className="text-xs">${num(o.shipped_amount)}</span>
+              </label>
+            ))}
+            {!others.data && <Spinner />}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="发票号"><input className="input" value={f.invoice_no} onChange={(e) => { setF({ ...f, invoice_no: e.target.value }); setRes(null) }} /></Field>
+          <Field label="发票日期"><input className="input" type="date" value={f.invoice_date} onChange={(e) => { setF({ ...f, invoice_date: e.target.value }); setRes(null) }} /></Field>
+          <Field label="账期"><input className="input" value={f.terms} onChange={(e) => { setF({ ...f, terms: e.target.value }); setRes(null) }} /></Field>
+          <Field label="QuickBooks 客户名"><input className="input" value={f.customer_name} onChange={(e) => { setF({ ...f, customer_name: e.target.value }); setRes(null) }} /></Field>
+        </div>
+        <Segmented value={f.basis} onChange={(v: string) => { setF({ ...f, basis: v }); setRes(null) }} items={[{ key: 'shipped', label: '按实发（扣拒收）' }, { key: 'ordered', label: '按订量' }]} />
+        {res && (
+          <div className="rounded-lg bg-emerald-50 p-3 text-emerald-900">
+            <div className="font-medium">{res.rows} 行 · 合计 ${num(res.total)}</div>
+            <div className="text-xs">{res.customer} · {res.invoice_date} · 到期 {res.due_date}</div>
+            {res.warnings.map((w: string, i: number) => <div key={i} className="mt-1 text-xs text-amber-800">{w}</div>)}
+          </div>
+        )}
+      </div>
     </Modal>
   )
 }
@@ -371,12 +434,12 @@ function NewOrder({ onClose, onCreated }: { onClose: () => void; onCreated: (id:
     } catch (e) { toast(errMsg(e), 'err') }
   }
   return (
-    <Modal open onClose={onClose} wide title="手工录入订单" footer={<button className="btn-primary" disabled={!f.po_no} onClick={save}>保存</button>}>
+    <Modal open onClose={onClose} wide title="手工录入订单" footer={<button className="btn-primary" disabled={!f.customer_id} onClick={save}>保存</button>}>
       <p className="mb-2 text-xs text-slate-500">更方便的方式：把 PO 发给 ChatGPT，让它录入后你在「资料中心 → 批量导入」确认。</p>
       <div className="grid gap-2 sm:grid-cols-3">
         <Field label="客户"><select className="input" value={f.customer_id} onChange={(e) => setF({ ...f, customer_id: e.target.value })}>{(custs.data || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
         <Field label="送货点"><select className="input" value={f.site_id} onChange={(e) => setF({ ...f, site_id: e.target.value })}><option value="">—</option>{(cust?.sites || []).map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
-        <Field label="PO 号 *"><input className="input" value={f.po_no} onChange={(e) => setF({ ...f, po_no: e.target.value })} /></Field>
+        <Field label="PO 号（还没有可空着，之后补）"><input className="input" value={f.po_no} onChange={(e) => setF({ ...f, po_no: e.target.value })} /></Field>
         <Field label="下单日期"><input className="input" type="date" value={f.po_date} onChange={(e) => setF({ ...f, po_date: e.target.value })} /></Field>
         <Field label="要求交货"><input className="input" type="date" value={f.required_date} onChange={(e) => setF({ ...f, required_date: e.target.value })} /></Field>
         <Field label="类别"><input className="input" placeholder="General / Freezer / 中央厨房" value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} /></Field>
@@ -389,7 +452,7 @@ function NewOrder({ onClose, onCreated }: { onClose: () => void; onCreated: (id:
             <select className="input" value={l.unit} onChange={(e) => setLine(i, { unit: e.target.value })}><option value="箱">箱</option><option value="磅">lb</option></select>
             <input className="input" type="number" inputMode="decimal" placeholder="数量" value={l.qty} onChange={(e) => setLine(i, { qty: e.target.value })} />
             <input className="input" type="number" inputMode="decimal" placeholder="单价 $" value={l.price} onChange={(e) => setLine(i, { price: e.target.value })} />
-            <select className="input" value={l.sku_id} onChange={(e) => setLine(i, { sku_id: e.target.value })}><option value="">SKU（可后配）</option>{(master.data?.skus || []).map((s: any) => <option key={s.id} value={s.id}>{s.code} {s.name}</option>)}</select>
+            <select className="input" value={l.sku_id} onChange={(e) => setLine(i, { sku_id: e.target.value })}><option value="">SKU（可后配）</option>{(master.data?.skus || []).map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select>
             <button className="btn-ghost" aria-label="删除行" onClick={() => setLines(lines.filter((_, j) => j !== i))}><Trash2 size={16} /></button>
           </div>
         ))}
@@ -427,7 +490,7 @@ export function OrdersModule({ preview }: ModProps) {
         {(list.data || []).map((o: any) => (
           <button key={o.id} onClick={() => open(o.id)} className={`block w-full rounded-lg border p-3 text-left active:bg-slate-50 sm:hover:bg-slate-50 ${o.overdue ? 'border-red-200' : 'border-slate-200'}`}>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono font-semibold">PO {o.po_no}</span>
+              <span className={`font-mono font-semibold ${o.po_no ? '' : 'text-amber-700'}`}>{poLabel(o.po_no)}</span>
               <Badge color={ST_COLOR[o.status]}>{o.status_label}</Badge>
               {o.overdue && <Badge color="red"><AlertTriangle size={10} />过交期</Badge>}
               {o.due_soon && <Badge color="yellow">今明要交</Badge>}

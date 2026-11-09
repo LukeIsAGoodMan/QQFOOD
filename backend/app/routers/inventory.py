@@ -97,18 +97,23 @@ def posting_out(db: Session, p: InventoryPosting, duplicate=False):
 # ---------- master data ----------
 @router.get("/master")
 def master(u: User = Depends(current_user), db: Session = Depends(get_db)):
+    from ..models import Customer, CustomerItem
+    t = db.query(Customer).filter_by(code="TNT").first()
+    tnt = {}
+    for ci in (db.query(CustomerItem).filter(CustomerItem.customer_id == t.id, CustomerItem.item_no != "").order_by(CustomerItem.updated_at) if t else []):
+        tnt.setdefault(ci.sku_id, ci.item_no)
     return {
         "warehouses": [{"id": w.id, "code": w.code, "name": w.name, "kind": w.kind, "tracked": w.tracked, "active": w.active}
                        for w in db.query(Warehouse).order_by(Warehouse.tracked.desc(), Warehouse.name)],
         "skus": [{"id": s.id, "code": s.code, "name": s.name, "category": s.category, "base_unit": s.base_unit,
-                  "conversions": s.conversions, "barcode": s.barcode} for s in db.query(Sku).order_by(Sku.code)],
+                  "conversions": s.conversions, "barcode": s.barcode, "tnt_item_no": tnt.get(s.id, "")} for s in db.query(Sku).order_by(Sku.name)],
         "lots": [{"id": l.id, "sku_id": l.sku_id, "lot_code": l.lot_code, "expiry": l.expiry,
                   "quality_status": l.quality_status} for l in db.query(Lot).order_by(Lot.lot_code)],
     }
 
 
 class SkuIn(BaseModel):
-    code: str
+    code: str = ""  # 可空：以品名为主，系统自动编号
     name: str
     category: str = "原料"
     base_unit: str = "箱"
@@ -119,6 +124,10 @@ class SkuIn(BaseModel):
 @router.post("/skus")
 def create_sku(body: SkuIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
     require(u, "inventory.master")
+    from .batches import _norm, next_sku_code
+    if any(_norm(x.name) == _norm(body.name) for x in db.query(Sku)):
+        raise HTTPException(409, f"已有同名商品「{body.name}」")
+    body.code = body.code.strip().upper() or next_sku_code(db)
     if db.query(Sku).filter_by(code=body.code).first():
         raise HTTPException(409, "SKU 编码已存在")
     s = Sku(**body.model_dump())
@@ -195,9 +204,15 @@ def scan(code: str, u: User = Depends(current_user), db: Session = Depends(get_d
         if lot:
             return {"type": "lot", "lot_id": lot.id, "sku_id": lot.sku_id, "lot_code": lot.lot_code,
                     "quality_status": lot.quality_status}
-    sku = db.query(Sku).filter((Sku.code == code) | (Sku.barcode == code)).first()
+    sku = db.query(Sku).filter((Sku.code == code) | (Sku.barcode == code) | (Sku.code == code.upper())).first()
     if sku:
         return {"type": "sku", "sku_id": sku.id, "code": sku.code, "name": sku.name}
+    from .aliases import lookup
+    exact = [h for h in lookup(db, code) if any(v["exact"] for v in h["via"])]
+    if len(exact) == 1:  # 外库 / 大统华 / 供应商的编码 → 我们的 SKU
+        h = exact[0]
+        v = next(v for v in h["via"] if v["exact"])
+        return {"type": "sku", "sku_id": h["sku"]["id"], "code": h["sku"]["code"], "name": h["sku"]["name"], "via": f"{v['party']} {v['code']}"}
     lots = db.query(Lot).filter_by(lot_code=code).all()
     if len(lots) == 1:
         l = lots[0]
@@ -529,6 +544,7 @@ class TransferIn(BaseModel):
     note: str = ""
     lines: list[TLineIn]
     shipped_now: bool = False  # 对方已发出：按单据数量直接记为在途（常用于多伦多/温哥华调入）
+    shortfall_reason: str = ""  # 来源仓账面不足时按单据补记的原因（例外）
 
 
 @router.post("/transfers")
@@ -555,12 +571,44 @@ def create_transfer(body: TransferIn, u: User = Depends(current_user), db: Sessi
     audit(db, u, "transfer.created", "transfer", t.id, code=t.code, shipped_now=body.shipped_now)
     if body.shipped_now:
         p = begin_posting(db, u, f"transfer-create-ship:{t.id}", "transfer_ship", "transfer", t.id)
-        _ship_lines(db, u, t, p, [(tl, tl.qty_requested) for tl in created])
+        _ship_lines(db, u, t, p, [(tl, tl.qty_requested) for tl in created], body.shortfall_reason)
     db.commit()
     return transfer_out(db, t)
 
 
-def _ship_lines(db: Session, u: User, t: Transfer, p, pairs):
+def cover_source(db: Session, u: User, p, t: Transfer, sku_id: str, lot_id: str | None, qty: float, reason: str = ""):
+    """来源仓（如 Supreme 外库）账面不够时：
+    1) 先把该仓“未分批次”的库存认定为这个批次（期初常常没录 Lot）——自动，留审计；
+    2) 还不够的部分属于例外：必须写原因，按单据补记到来源仓再调出，留审计。"""
+    have = balance(db, sku_id, t.from_wh, "on_hand", lot_id)
+    short = round(qty - have, 6)
+    if short <= 1e-9:
+        return
+    relabeled = 0.0
+    if lot_id:
+        unlot = balance(db, sku_id, t.from_wh, "on_hand", None)
+        relabeled = round(min(max(unlot, 0), short), 6)
+    added = round(short - relabeled, 6)
+    if added > 1e-9 and not (reason or "").strip():
+        sku = db.get(Sku, sku_id)
+        lot = db.get(Lot, lot_id) if lot_id else None
+        msg = (f"来源仓账面不足：{sku.code if sku else ''}{f' 批次 {lot.lot_code}' if lot else ''} "
+               f"现有 {round(have + relabeled, 4):g}，本次 {qty:g}。如果对方实际有货（账面没记全），填写原因后可按单据补记。")
+        db.rollback()  # 批次等可能是本次新建的，回滚后不能再读
+        raise HTTPException(409, {"code": "source_short", "msg": msg})
+    if relabeled > 0:
+        txn(db, p, sku_id, t.from_wh, "on_hand", -relabeled, None)
+        txn(db, p, sku_id, t.from_wh, "on_hand", relabeled, lot_id)
+    if added > 1e-9:
+        txn(db, p, sku_id, t.from_wh, "on_hand", added, lot_id)
+        tag = f"［例外：来源仓账面补记 {added:g}，原因：{reason.strip()}］"
+        if tag not in (t.note or ""):
+            t.note = f"{t.note or ''} {tag}".strip()
+    audit(db, u, "transfer.source_adjusted", "transfer", t.id, sku=sku_id, lot=lot_id, relabeled=relabeled, added=added,
+          reason=(reason or "").strip())
+
+
+def _ship_lines(db: Session, u: User, t: Transfer, p, pairs, shortfall_reason: str = ""):
     """来源仓管账：检查并扣减来源仓；来源地不管账（多伦多/温哥华）：只记目的仓在途。"""
     src = db.get(Warehouse, t.from_wh)
     for l, qty in pairs:
@@ -568,10 +616,7 @@ def _ship_lines(db: Session, u: User, t: Transfer, p, pairs):
             continue
         assert_usable(db, l.lot_id, "调拨发运")
         if src.tracked:
-            have = balance(db, l.sku_id, t.from_wh, "on_hand", l.lot_id)
-            if qty > have + 1e-9:
-                db.rollback()
-                raise HTTPException(409, f"来源仓账面不足：现有 {have}")
+            cover_source(db, u, p, t, l.sku_id, l.lot_id, qty, shortfall_reason)
             txn(db, p, l.sku_id, t.from_wh, "on_hand", -qty, l.lot_id)
         txn(db, p, l.sku_id, t.to_wh, "in_transit", qty, l.lot_id)
         l.qty_shipped += qty
@@ -588,6 +633,7 @@ class ShipLine(BaseModel):
 class ShipIn(BaseModel):
     idempotency_key: str
     lines: list[ShipLine]
+    shortfall_reason: str = ""
 
 
 @router.post("/transfers/{tid}/ship")
@@ -607,7 +653,7 @@ def ship(tid: str, body: ShipIn, u: User = Depends(current_user), db: Session = 
         if not l:
             raise HTTPException(400, "行不存在")
         pairs.append((l, sl.qty))
-    _ship_lines(db, u, t, p, pairs)
+    _ship_lines(db, u, t, p, pairs, body.shortfall_reason)
     db.commit()
     return {**posting_out(db, p), "transfer": transfer_out(db, t)}
 

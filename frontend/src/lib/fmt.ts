@@ -40,3 +40,7 @@ export function toLocalInput(v: any) {
 
 export const num = (n: any) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 }))
 export const bytes = (n: number) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`)
+
+/** 商品以品名为主，大统华 Item# 作补充。 */
+export const skuLabel = (s: any) => (s ? `${s.name}${s.tnt_item_no ? `（T&T ${s.tnt_item_no}）` : ''}` : '')
+export const poLabel = (po?: string) => (po ? `PO ${po}` : 'PO 待补')
