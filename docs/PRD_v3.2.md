@@ -606,7 +606,7 @@ ING-17：断开连接或停用转发停止新获取，不自动删除已关联�
 
 ING-18：开发前先确认使用QuickBooks Online还是Desktop。Online通过官方API对接；Desktop需通过Web Connector或SDK在装有QuickBooks的电脑上运行，工作量、部署方式和稳定性差别很大，两者需分别评估（附录C）。使用Online API时，生产环境密钥需通过Intuit开发者平台的应用审核。
 
-ING-18a（v3.2e，已决定）：使用 QuickBooks（发票在 QuickBooks 中开具）。在 API 对接之前，先提供“导出 QuickBooks 发票 CSV”（QuickBooks Online 导入发票格式）：可把同一客户的多张已发货订单合成一张发票，商品用对照中的 QuickBooks 品名、描述带客户 Item#，数量默认按实发扣拒收，可改为按订量；缺 QuickBooks 品名的行提示补对照；导出留审计。若实际使用 Desktop 版，改为 IIF 格式。
+ING-18a（v3.2e，已决定）：使用 QuickBooks（发票在 QuickBooks 中开具）。在 API 对接之前，先提供“导出 QuickBooks 发票 CSV”（QuickBooks Online 导入发票格式）：可把同一客户的多张已发货订单合成一张发票，商品用对照中的 QuickBooks 品名、描述带客户 Item#，数量默认按实发扣拒收，可改为按订量；缺 QuickBooks 品名的行提示补对照；导出留审计。已确认使用 QuickBooks Online（2026-11-08）。
 
 ING-19：先实现单向读取与核对，再单独评审写回。首次连接明确公司身份、日期范围、币种、客户供应商映射和字段归属。账单/发票/付款是不同对象，支持部分付款、贷项、退款及作废对余额的影响；订单已送不自动视为已付款。仅同步接口实际可取得的附件；拿不到附件时显示“无附件/待补”，不伪造证据。
 
