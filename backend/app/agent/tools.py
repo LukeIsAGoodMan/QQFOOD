@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from . import proof
 from ..core import FILE_SIGN_KEY, ROLES
 from ..models import BusinessRecord, FieldDefinition, IngestItem, Lot, Sku, Task, User, Warehouse
 from ..routers import evidence as ev_r, ingest as ing_r, inventory as inv_r, metrics as met_r, notebook as nb_r
@@ -41,6 +42,9 @@ INSTRUCTIONS = (
     "9) 一物多码：商品以品名为主（我们自己的叫法），大统华 Item# 作为补充编号；内部编码可以不给，系统自动编号。库存只记我们自己的商品。大统华 Item#、外库（如 Supreme：Vatee-001）、供应商编码、QuickBooks 品名都是“对照”，"
     "不要为它们新建 SKU。先用 list_item_aliases 查；没有就用 propose_item_aliases 提交对照。外库 BOL / 调货单用 propose_inbound，"
     "行里直接填对方的 party_code / party_name，系统会按对照换成我们的 SKU，对不上的由用户在确认页选一次并记住。"
+    "10) 证据（proof）：每次提交或更新采购、库存、出货、生产、安装结果，工具返回里都有 proof：按 proof.suggested 主动提醒用户上传对应的 PDF / 照片原件，"
+    "并给出 proof.upload_url（手机直接传，30 分钟有效）。用户暂时没有就照常提交，在 proof_note 写明缺什么、何时补；不要因为缺证据而不提交，也不要编造证据。"
+    "之后用 list_missing_proof 查还缺原件的单据，用 request_upload_link 生成新链接补传。原件上传后仍需人核验。"
 )
 
 
@@ -372,9 +376,9 @@ TASK_FIELD_ALIASES = {"due_at": "due_at", "截止时间": "due_at", "截止": "d
        "changes": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "object", "properties": {
            "field": {"type": "string"}, "new_value": {"type": ["string", "number", "boolean"]}, "reason": {"type": "string"}},
            "required": ["field", "new_value"], "additionalProperties": False}},
-       "source_summary": {"type": "string", "description": "依据：用户说了什么 / 图片里写了什么（原文摘录），将作为“AI 转述（非原件）”存证"}},
+       "source_summary": {"type": "string", "description": "依据：用户说了什么 / 图片里写了什么（原文摘录），将作为“AI 转述（非原件）”存证"}, "proof_note": {"type": "string", "description": "证据情况：已让用户上传什么，或还没有、何时补（如“签收单在司机那，明天补”）。没有证据也照常提交"}},
       ["target_type", "target_id", "changes", "source_summary"], tier="propose")
-def propose_change(ctx, db, target_type, target_id, changes, source_summary):
+def propose_change(ctx, db, target_type, target_id, changes, source_summary, proof_note=""):
     u = ctx.user
     if target_type == "record":
         obj = db.get(BusinessRecord, target_id)
@@ -424,12 +428,15 @@ def propose_change(ctx, db, target_type, target_id, changes, source_summary):
             f"目标：{obj.title}\n\n{source_summary}\n").encode("utf-8")
     ev, ver, _ = ev_r.ingest_file(db, u, note, f"ai-note-{stamp}.txt", title=f"AI 转述：{source_summary[:40]}", source=f"agent:{ctx.client}")
     it = IngestItem(evidence_id=ev.id, mode="suggest", status="inbox", source="agent", owner_id=u.id, created_by=u.id,
-                    context_type=target_type, context_id=target_id, note=f"由 {ctx.client} 提出；原件如有请补充上传")
+                    context_type=target_type, context_id=target_id,
+                    note=f"由 {ctx.client} 提出；" + (f"证据：{proof_note}" if proof_note else "原件如有请补充上传"))
     db.add(it)
     db.flush()
     ev_r.create_link(db, u, ver, "ingest", it.id, "来源资料")
     cs = ing_r.propose(it.id, ing_r.ProposeIn(target_type=target_type, target_id=target_id, changes=rows), u, db)
+    pk = {"po": "purchase", "so": "shipment", "task": "task"}.get(target_type) or proof.kind_for_record(db, target_id)
     return {"status": "pending_confirmation", "message": "已提交为待确认变更，尚未生效。请用户打开链接逐项确认。",
+            "proof": proof.block(ctx, db, pk, target_type, target_id, proof_note),
             "changes": [{"field": c["label"], "old": c["old"], "new": c["new"]} for c in cs["changes"]],
             "confirm_url": _link(ctx, "ingest", it.id),
             "target_url": ctx.link(f"/purchasing?po={target_id}") if target_type == "po" else ctx.link(f"/orders?so={target_id}") if target_type == "so" else _link(ctx, target_type, target_id)}
@@ -458,20 +465,34 @@ def verify_upload(token: str) -> dict:
 
 
 @tool("request_upload_link", "生成原件上传链接", "生成一个 30 分钟有效的手机上传链接，让用户把照片/PDF 原件直接上传到指定任务、记录或调拨单（作为证据，待核验）。",
-      {"target_type": {"type": "string", "enum": ["task", "record", "transfer", "po", "so"]}, "target_id": {"type": "string"},
+      {"target_type": {"type": "string", "enum": ["task", "record", "transfer", "po", "so", "shipment", "production", "batch", "lot"],
+                       "description": "batch=之前提交的批次（确认后自动挂到生成的调入单/订单）；shipment=发货记录（签收单）；production=生产记录；lot=批次标签"},
+       "target_id": {"type": "string", "description": "id；采购单/订单/发货/生产/批次也可用单号（PO-…、SO-…、SH-…、PB-…、BT-…）"},
        "purpose": {"type": "string", "description": "用途，如 签收单、安装后照片、发票、付款证明、整改证明"}}, ["target_type", "target_id"], tier="write")
 def request_upload_link(ctx, db, target_type, target_id, purpose="附件"):
-    from ..models import PurchaseOrder
-    from ..models import SalesOrder
-    exists = {"task": Task, "record": BusinessRecord, "po": PurchaseOrder, "so": SalesOrder}.get(target_type)
-    if exists and not db.get(exists, target_id):
+    from ..models import BatchProposal, Lot, ProductionBatch, PurchaseOrder, SalesOrder, Shipment, Transfer
+    model = {"task": Task, "record": BusinessRecord, "po": PurchaseOrder, "so": SalesOrder, "transfer": Transfer, "shipment": Shipment,
+             "production": ProductionBatch, "batch": BatchProposal, "lot": Lot}[target_type]
+    obj = db.get(model, target_id)
+    if not obj and hasattr(model, "code"):
+        obj = db.query(model).filter_by(code=target_id.strip().upper()).first()
+    if not obj:
         raise ToolError("目标不存在")
-    if target_type == "transfer":
-        from ..models import Transfer
-        if not db.get(Transfer, target_id):
-            raise ToolError("调拨单不存在")
+    target_id = obj.id
     return {"upload_url": ctx.link(f"/u/{sign_upload(ctx.user.id, target_type, target_id, purpose)}"), "expires_in_minutes": 30,
             "purpose": purpose, "note": "上传后为“未核验”证据，需由他人核验。"}
+
+
+@tool("list_missing_proof", "还缺原件的单据", "列出最近还没有任何原件（PDF/照片）的单据：ChatGPT 提交的盘点/调入/订单批次、发货（签收单）、调入单、采购单、生产记录、设备安装记录。"
+      "每条给出建议上传什么（suggested）、当时记下的 proof_note，以及 target_type/target_id，可直接用 request_upload_link 生成补传链接。缺原件不影响业务，只是追溯不完整。",
+      {"days": {"type": "integer", "description": "看最近几天（默认 30）"}, "limit": {"type": "integer", "description": "最多几条（默认 30）"}})
+def list_missing_proof(ctx, db, days=30, limit=30):
+    rows = proof.missing(db, int(days or 30), min(int(limit or 30), 100))
+    for r in rows:
+        r["url"] = ctx.link(r["url"]) if r["url"] else None
+        r["date"] = r["date"].isoformat() if hasattr(r["date"], "isoformat") else r["date"]
+    return {"missing": rows, "count": len(rows),
+            "note_for_ai": "挑最近、最重要的几条提醒用户补（出货签收单、到货 BOL 优先）；用户说没有就算了，不要反复催。"}
 
 
 def tool_list():
@@ -511,6 +532,7 @@ def _batch_reply(ctx, b, db):
                                "mapped": "已按对照对上", "unmapped": "未对上我们的 SKU（用户在确认页选一次即记住）"},
             "errors": errs, "warnings": warns, "confirm_url": ctx.link(f"/ingest?batch={b.id}"),
             "message": "已提交为待确认批次，尚未生效。请用户打开 confirm_url 勾选确认。若有错误行，可修正后另提一批。",
+            **({"proof": proof.block(ctx, db, b.kind, "batch", b.id, (b.meta or {}).get("proof_note", ""))} if b.kind in proof.GUIDE else {}),
             **({"possible_earlier_delivery": [{k: c[k] for k in ("code", "required_date", "lines")} for c in d["fill_candidates"]],
                 "note_for_ai": "有之前没填 PO 的送货单，可能就是这张 PO 的货；告诉用户在确认页选择“补到该单”。"} if d.get("fill_candidates") else {})}
 
@@ -532,10 +554,10 @@ def propose_skus(ctx, db, rows, source_summary):
       "unit（可空=基本单位）、counted（true=实盘写入实物；false=估计，写入“未核数”不算可用）、note。"
       "外库报表上是对方编码时，可不填 sku_code，改填 party_code / party_name，系统按对照找我们的 SKU。不会直接生效。",
       {"rows": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},
-       "source_summary": {"type": "string"}, "as_of": {"type": "string", "description": "数据日期，如 2026-11-05"}},
+       "source_summary": {"type": "string"}, "as_of": {"type": "string", "description": "数据日期，如 2026-11-05"}, "proof_note": {"type": "string", "description": "证据情况：已让用户上传什么，或还没有、何时补（如“签收单在司机那，明天补”）。没有证据也照常提交"}},
       ["rows", "source_summary"], tier="propose")
-def propose_stock_counts(ctx, db, rows, source_summary, as_of=None):
-    b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="stock_count", rows=rows, meta={"as_of": as_of},
+def propose_stock_counts(ctx, db, rows, source_summary, as_of=None, proof_note=""):
+    b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="stock_count", rows=rows, meta={"as_of": as_of, "proof_note": proof_note},
                                                         source_note=source_summary), source=f"agent:{ctx.client}")
     db.commit()
     return _batch_reply(ctx, b, db)
@@ -548,10 +570,10 @@ def propose_stock_counts(ctx, db, rows, source_summary, as_of=None):
       {"from_code": {"type": "string"}, "to_code": {"type": "string"}, "expected_date": {"type": "string", "description": "YYYY-MM-DD"},
        "note": {"type": "string", "description": "车次、柜号、BOL 等"},
        "lines": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},
-       "source_summary": {"type": "string"}}, ["from_code", "lines", "source_summary"], tier="propose")
-def propose_inbound(ctx, db, from_code, lines, source_summary, to_code="WH597", expected_date=None, note=""):
+       "source_summary": {"type": "string"}, "proof_note": {"type": "string", "description": "证据情况：已让用户上传什么，或还没有、何时补（如“签收单在司机那，明天补”）。没有证据也照常提交"}}, ["from_code", "lines", "source_summary"], tier="propose")
+def propose_inbound(ctx, db, from_code, lines, source_summary, to_code="WH597", expected_date=None, note="", proof_note=""):
     b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="inbound", rows=lines, meta={"from_code": from_code, "to_code": to_code,
-                                                                                          "expected_date": expected_date, "note": note},
+                                                                                          "expected_date": expected_date, "note": note, "proof_note": proof_note},
                                                         source_note=source_summary), source=f"agent:{ctx.client}")
     db.commit()
     return _batch_reply(ctx, b, db)
@@ -611,18 +633,18 @@ def list_customers(ctx, db, customer=None):
       "lines 每行：item_no（客户 Item#，有就填）、description（用英文品名；PDF 里乱码的中文行忽略）、pack_size、unit（case=箱，lb=磅）、qty、price（单价）、sku_code（如能判断我们对应的 SKU）。"
       "不会直接生效：返回 confirm_url 给用户确认，以及 upload_url 让用户上传 PO 原件。",
       {"customer": {"type": "string"}, "site": {"type": "string"}, "po_no": {"type": "string"}, "po_date": {"type": "string"},
-       "required_date": {"type": "string"}, "category": {"type": "string"}, "note": {"type": "string"},
+       "required_date": {"type": "string"}, "category": {"type": "string"}, "note": {"type": "string"}, "proof_note": {"type": "string", "description": "证据情况：已让用户上传什么，或还没有、何时补（如“签收单在司机那，明天补”）。没有证据也照常提交"},
        "lines": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "object"}},
        "source_summary": {"type": "string", "description": "来源，如 “11/5 邮件 PO 623030105 PDF 第 1 页”"}},
       ["lines", "source_summary"], tier="propose")
-def propose_order(ctx, db, lines, source_summary, po_no="", customer=None, site=None, po_date=None, required_date=None, category="", note=""):
+def propose_order(ctx, db, lines, source_summary, po_no="", customer=None, site=None, po_date=None, required_date=None, category="", note="", proof_note=""):
     meta = {"customer": customer or "TNT", "site": site, "po_no": (po_no or "").strip(), "po_date": (po_date or "")[:10] or None,
-            "required_date": (required_date or "")[:10] or None, "category": category, "note": note}
+            "required_date": (required_date or "")[:10] or None, "category": category, "note": note, "proof_note": proof_note}
     b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="order", rows=lines, meta=meta, source_note=source_summary), source=f"agent:{ctx.client}")
     db.commit()
     out = _batch_reply(ctx, b, db)
-    out["upload_url"] = ctx.link(f"/u/{sign_upload(ctx.user.id, 'batch', b.id, 'PO 原件')}")
-    out["message"] += " 请同时用 upload_url 上传 PO 原件（PDF/照片），确认后会自动挂到订单上。"
+    out["upload_url"] = out["proof"]["upload_url"]
+    out["message"] += " 请同时用 upload_url 上传 PO 原件（PDF/照片），确认后会自动挂到订单上；没有原件也可以先确认，之后再补。"
     return out
 
 

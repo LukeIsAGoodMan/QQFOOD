@@ -198,12 +198,13 @@ _uploads: dict[str, int] = defaultdict(int)
 
 
 def _target_title(db, d):
-    from ..models import BatchProposal, SalesOrder
-    model = {"task": Task, "record": BusinessRecord, "transfer": Transfer, "po": PurchaseOrder, "batch": BatchProposal, "so": SalesOrder}[d["t"]]
+    from ..models import BatchProposal, Lot, ProductionBatch, SalesOrder, Shipment
+    model = {"task": Task, "record": BusinessRecord, "transfer": Transfer, "po": PurchaseOrder, "batch": BatchProposal, "so": SalesOrder,
+             "shipment": Shipment, "production": ProductionBatch, "lot": Lot}[d["t"]]
     obj = db.get(model, d["i"])
     if not obj:
         raise HTTPException(404, "目标不存在")
-    return getattr(obj, "title", None) or getattr(obj, "code", "")
+    return getattr(obj, "title", None) or getattr(obj, "code", None) or getattr(obj, "lot_code", "")
 
 
 @router.get("/api/upload-link/{token}")

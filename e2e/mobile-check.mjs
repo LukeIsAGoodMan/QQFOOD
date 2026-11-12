@@ -614,6 +614,27 @@ let exceptionTaskId
   await page.context().close()
 }
 
+// ---------- 15. 证据可后补：ChatGPT 提交盘点时说“盘点表明天拍” → 确认页看到建议上传什么，可直接补传；生产记录也能挂照片 ----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => (await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined })).json(), [path, body, method])
+  const b = await call('/api/batches', { kind: 'stock_count', meta: { as_of: '2026-11-11', proof_note: '盘点表明天拍照补' }, source_note: '11/11 冷库盘点（口述）',
+    rows: [{ sku_code: 'RM-SPICE', warehouse_code: 'WH597', qty: 3, counted: true }] })
+  await page.goto(`${BASE}/ingest?batch=${b.id}`); await page.waitForTimeout(1200)
+  ok('确认页提示建议上传的原件（可后补）', await page.locator('text=原件 / 照片（可后补）').count() > 0 && await page.locator('text=盘点表明天拍照补').count() > 0)
+  ok('没有原件也能确认', await page.locator('button', { hasText: '确认所选' }).isEnabled())
+  await checkLayout(page, '确认页（证据可后补）')
+  await shot(page, 'prf-01-batch-proof')
+  await page.goto(`${BASE}/production`); await page.waitForTimeout(1200)
+  await page.locator('button[aria-pressed]', { hasText: '生产记录' }).first().tap(); await page.waitForTimeout(500)
+  const pbtn = page.locator('button', { hasText: '生产记录 / 照片' }).first()
+  ok('生产记录可以挂照片', await pbtn.count() === 1)
+  if (await pbtn.count()) { await pbtn.tap(); await page.waitForTimeout(600) }
+  await checkLayout(page, '生产记录（照片）')
+  await shot(page, 'prf-02-production-proof')
+  await page.context().close()
+}
+
 await browser.close()
 const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} 通过；页面脚本错误 ${pageErrors.length} 个；截图在 e2e/screenshots/`)

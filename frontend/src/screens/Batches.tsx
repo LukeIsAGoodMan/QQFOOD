@@ -3,6 +3,7 @@ import { Bot, Check, X } from 'lucide-react'
 import { ApiError, get, post } from '../lib/api'
 import { dt, skuLabel } from '../lib/fmt'
 import { Badge, Empty, Field, Spinner, errMsg, useLoad, useToast } from '../components/ui'
+import { EvidencePanel } from '../components/Evidence'
 
 const ACTION: Record<string, [string, string]> = {
   new: ['新增', 'green'], update: ['修改', 'blue'], set: ['设定数量', 'blue'], unchanged: ['无变化', 'gray'],
@@ -12,6 +13,13 @@ const ST: Record<string, [string, string]> = { proposed: ['待确认', 'yellow']
 const selectable = (a: string) => ['new', 'update', 'set', 'duplicate', 'mapped', 'unmapped'].includes(a)
 const FIELD: Record<string, string> = { name: '名称', category: '分类', base_unit: '基本单位', conversions: '单位换算', barcode: '条码' }
 const fmtV = (v: any) => (v === null || v === undefined || v === '' ? '（空）' : typeof v === 'object' ? JSON.stringify(v) : String(v))
+
+// 建议上传的原件（与后端 app/agent/proof.py 一致）；没有也能确认，之后补
+const PROOF: Record<string, string[]> = {
+  stock_count: ['盘点表照片', '外库库存报表', '货架 / 冷库照片'],
+  inbound: ['BOL', '调货单', '到货照片', '差异照片'],
+  order: ['PO 原件', '客户沟通'],
+}
 
 export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => void }) {
   const toast = useToast()
@@ -55,6 +63,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
         <span className="text-xs text-slate-400">{b.created_by} · {dt(b.created_at)}</span>
       </div>
       {b.source_note && <div className="rounded bg-slate-50 p-2 text-sm text-slate-600">来源：{b.source_note}</div>}
+      {PROOF[b.kind] && b.meta?.proof_note && <div className="rounded bg-amber-50 p-2 text-sm text-amber-800">原件：{b.meta.proof_note}<span className="text-xs text-amber-700">（可先确认，下方「原件 / 照片」补传）</span></div>}
       {b.kind === 'order' && (
         <dl className="kv rounded bg-slate-50 p-2">
           <dt>PO 号</dt><dd className="font-mono font-semibold">{b.meta.po_no || <span className="font-sans font-normal text-amber-700">待补（先按送货单录）</span>}</dd>
@@ -112,6 +121,12 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
           <div className="font-medium text-amber-900">来源仓账面不够{shortSel.length > 0 && `（${shortSel.length} 行）`}</div>
           <p className="mt-0.5 text-xs text-amber-800">外库实际有货但账面没记全（比如期初漏录）时，写下原因可按单据补记，会标「例外」并留审计；否则取消勾选这些行。</p>
           <input className="input mt-2" placeholder="补记原因，如：Supreme 期初报表漏了 11/1 后入库的货" value={reason} onChange={(e) => setReason(e.target.value)} />
+        </div>
+      )}
+      {PROOF[b.kind] && (
+        <div className="rounded-lg border border-slate-200 p-3">
+          <p className="mb-2 text-xs text-slate-500">建议上传：{PROOF[b.kind].join('、')}（PDF / 照片）。没有也可以先确认，之后在这里补传，会自动挂到{b.kind === 'order' ? '订单' : b.kind === 'inbound' ? '调入单' : '这批记录'}上。</p>
+          <EvidencePanel title="原件 / 照片（可后补）" targetType="batch" targetId={b.id} purposes={PROOF[b.kind]} compact />
         </div>
       )}
       {open ? (
