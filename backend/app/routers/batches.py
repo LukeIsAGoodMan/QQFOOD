@@ -735,6 +735,10 @@ def apply(bid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
                                             note=f"{b.code} {b.meta.get('note') or ''}".strip(), lines=lines, shipped_now=True,
                                             shortfall_reason=body.shortfall_reason), u, db)
             b.result = {**(b.result or {}), "transfer_id": tr["id"], "transfer_code": tr["code"]}
+            from ..models import EvidenceLink, EvidenceVersion
+            from .evidence import create_link
+            for l in db.query(EvidenceLink).filter_by(target_type="batch", target_id=b.id, active=True):  # BOL 原件跟到调入单
+                create_link(db, u, db.get(EvidenceVersion, l.evidence_version_id), "transfer", tr["id"], l.purpose)
     b.status = "applied" if len(applied) == len(b.rows) else ("partial" if applied else "rejected")
     b.decided_by, b.decided_at = u.id, _now()
     b.result = {**(b.result or {}), "applied": applied, "skipped": skipped, "note": body.note,

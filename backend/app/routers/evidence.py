@@ -87,6 +87,13 @@ def create_link(db: Session, u: User, ver: EvidenceVersion, target_type: str, ta
     db.flush()
     audit(db, u, "evidence.linked", target_type, target_id, evidence=ver.evidence_id, version=ver.version_no,
           purpose=purpose)
+    if target_type == "batch":  # 批次确认后再补传的原件，同时挂到它生成的订单 / 调入单上
+        from ..models import BatchProposal
+        b = db.get(BatchProposal, target_id)
+        r = (b.result or {}) if b else {}
+        for t, k in (("so", "order_id"), ("transfer", "transfer_id")):
+            if r.get(k):
+                create_link(db, u, ver, t, r[k], purpose, item_key)
     return l
 
 

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Factory, Plus, ShoppingCart, Trash2 } from 'lucide-react'
+import { Camera, Factory, Plus, ShoppingCart, Trash2 } from 'lucide-react'
 import { get, patch, post, put, uuid } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { dt, num, skuLabel } from '../lib/fmt'
 import { Badge, Empty, Field, LOT_COLOR, LOT_LABEL, Modal, Segmented, Spinner, errMsg, useLoad, useToast } from '../components/ui'
 import { BoxLabels } from './orders'
+import { EvidencePanel } from '../components/Evidence'
 import type { ModProps } from './basic'
 import { FOOD, UNCAT } from './categories'
 
@@ -219,6 +220,7 @@ function Setup({ setup, reload }: { setup: any; reload: () => void }) {
 export function ProductionPlanModule({ preview }: ModProps) {
   const { can } = useAuth()
   const [tab, setTab] = useState('plan')
+  const [proof, setProof] = useState<string | null>(null)
   const setup = useLoad(() => (preview ? Promise.resolve(null) : get('/api/production/setup')), [preview])
   const runs = useLoad(() => (preview ? Promise.resolve([]) : get('/api/production/runs')), [preview])
   const [run, setRun] = useState<any>(null)
@@ -248,6 +250,8 @@ export function ProductionPlanModule({ preview }: ModProps) {
                   <span className="ml-auto text-xs text-slate-400">{dt(r.created_at)}</span></div>
                 <div className="mt-1 text-xs text-slate-600">投入 {num(r.consumed_qty)} → 产出 {num(r.output_qty)} {u(r.unit)}{r.boxes ? `（${r.boxes} 箱）` : ''} · 损耗 {num(r.loss_qty)}{r.loss_reason && `（${r.loss_reason}）`} · Lot {r.output_lot}</div>
                 <div className="text-xs text-slate-400">原料：{r.inputs.map((i: any) => `${i.sku_code} ${i.lot_code} ×${num(i.qty)}`).join('，')}</div>
+                <button className="btn-ghost btn-sm mt-1 -ml-2" onClick={() => setProof(proof === r.id ? null : r.id)}><Camera size={14} />生产记录 / 照片</button>
+                {proof === r.id && <div className="mt-2 border-t pt-2"><EvidencePanel targetType="production" targetId={r.id} purposes={['生产记录', '称重单', '成品标签', '原料标签', '损耗照片']} compact /></div>}
               </div>
             ))}
             {runs.data && !runs.data.length && <Empty>还没有生产记录</Empty>}
