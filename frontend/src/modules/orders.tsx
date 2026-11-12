@@ -350,7 +350,7 @@ function QuickBooksDialog({ so, onClose }: { so: any; onClose: () => void }) {
       ? <button className="btn-primary" onClick={download}><Download size={16} />下载 {res.filename}</button>
       : <button className="btn-primary" disabled={!picked.size || !f.invoice_no.trim()} onClick={go}>生成</button>}>
       <div className="space-y-3 text-sm">
-        <p className="text-xs text-slate-500">生成 QuickBooks Online「导入发票」用的 CSV：商品用 QuickBooks 品名（在「商品对照」里设），描述里带客户的 Item#。导入：QuickBooks ⚙ 设置 → 导入数据 → 发票。</p>
+        <p className="text-xs text-slate-500">生成 QuickBooks Online「导入发票」用的 CSV：商品用 QuickBooks 品名（在库存页「商品」里设），描述里带客户的 Item#。导入：QuickBooks ⚙ 设置 → 导入数据 → 发票。</p>
         <div>
           <div className="mb-1 font-medium">合并到这张发票的订单（同一客户）</div>
           <div className="max-h-48 space-y-1 overflow-y-auto">

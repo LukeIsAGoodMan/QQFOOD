@@ -19,7 +19,8 @@ def _ensure_columns():
     insp = inspect(engine)
     adds = {"users": [("agent_enabled", "BOOLEAN NOT NULL DEFAULT 0")],
             "warehouses": [("tracked", "BOOLEAN NOT NULL DEFAULT 1"), ("active", "BOOLEAN NOT NULL DEFAULT 1")],
-            "skus": [("catch_weight", "BOOLEAN NOT NULL DEFAULT 0"), ("purchase_pack", "FLOAT"), ("ship_pack", "FLOAT")],
+            "skus": [("catch_weight", "BOOLEAN NOT NULL DEFAULT 0"), ("purchase_pack", "FLOAT"), ("ship_pack", "FLOAT"),
+                     ("active", "BOOLEAN NOT NULL DEFAULT 1"), ("merged_into", "VARCHAR(32)")],
             "production_batches": [("order_id", "VARCHAR(32)"), ("consumed_qty", "FLOAT"), ("loss_qty", "FLOAT"), ("yield_pct", "FLOAT"),
                                    ("expected_yield_pct", "FLOAT"), ("loss_reason", "VARCHAR(300) NOT NULL DEFAULT ''"),
                                    ("boxes", "INTEGER NOT NULL DEFAULT 0")],

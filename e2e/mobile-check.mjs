@@ -546,11 +546,11 @@ let exceptionTaskId
   ok('确认后生成调入单，并记住 Vatee-001 = FG-SOUP', !!done.result?.transfer_code && al.some((a) => a.code === 'Vatee-001' && a.party === 'SUPREME'), done.result?.transfer_code)
   // 商品对照：用对方编码搜到我们的 SKU，加 QuickBooks 品名
   await page.goto(`${BASE}/inventory`); await page.waitForTimeout(1200)
-  await page.locator('button', { hasText: '商品对照' }).first().tap(); await page.waitForTimeout(800)
+  await page.getByRole('button', { name: '商品', exact: true }).tap(); await page.waitForTimeout(800)
   const dlg = page.locator('div[role=dialog]')
   await dlg.locator('input[type=search]').fill('Vatee'); await page.waitForTimeout(300)
   ok('用外库代码搜到我们的商品（按品名显示）', await dlg.locator('button', { hasText: '示例 成品汤料' }).count() === 1)
-  await checkLayout(page, '商品对照列表')
+  await checkLayout(page, '商品列表')
   await dlg.locator('button', { hasText: '示例 成品汤料' }).first().tap(); await page.waitForTimeout(500)
   await dlg.locator('button', { hasText: '加一个对照' }).tap()
   await dlg.locator('select').first().selectOption({ label: 'QuickBooks' })
@@ -632,6 +632,47 @@ let exceptionTaskId
   if (await pbtn.count()) { await pbtn.tap(); await page.waitForTimeout(600) }
   await checkLayout(page, '生产记录（照片）')
   await shot(page, 'prf-02-production-proof')
+  await page.context().close()
+}
+
+// ---------- 16. 商品主档：手机上新建商品；国内采购名和大统华品名建成了两个商品 → 合并（库存转过去，旧名记成旧称）----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => (await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined })).json(), [path, body, method])
+  const m0 = await api(page, '/api/inv/master')
+  const w = m0.warehouses.find((x) => x.code === 'WH597').id
+  const a = await call('/api/inv/skus', { name: '示例 三樱辣椒段', category: '干货' })
+  const b = await call('/api/inv/skus', { name: '示例 剁椒', category: '干货', tnt_item_no: '777897' })
+  await call('/api/inv/receive', { idempotency_key: 'e2e-merge-' + Date.now(), sku_id: a.id, warehouse_id: w, qty: 30, lot_code: '2602-A' })
+  await page.goto(`${BASE}/inventory`); await page.waitForTimeout(1200)
+  await page.getByRole('button', { name: '商品', exact: true }).tap(); await page.waitForTimeout(800)
+  const dlg = page.locator('div[role=dialog]').last()
+  // 新建
+  await dlg.locator('button', { hasText: '新建商品' }).tap(); await page.waitForTimeout(400)
+  await dlg.locator('label:has-text("品名") input').fill('示例 圆罐内托')
+  await dlg.locator('button', { hasText: '生产用品' }).tap()
+  await checkLayout(page, '新建商品')
+  await shot(page, 'sku-01-new')
+  await dlg.locator('button', { hasText: '保存' }).tap(); await page.waitForTimeout(900)
+  const nw = (await api(page, '/api/inv/master')).skus.find((s) => s.name === '示例 圆罐内托')
+  ok('手机上新建商品（自动编号、分类）', nw?.category === '生产用品' && /^QQ-/.test(nw?.code || ''), nw?.code)
+  await dlg.locator('button[aria-label="返回列表"]').tap(); await page.waitForTimeout(400)
+  // 合并
+  await dlg.locator('input[type=search]').fill('三樱'); await page.waitForTimeout(300)
+  await dlg.locator('button', { hasText: '示例 三樱辣椒段' }).first().tap(); await page.waitForTimeout(500)
+  await dlg.locator('button', { hasText: '合并' }).first().tap(); await page.waitForTimeout(500)
+  await dlg.locator('input[type=search]').fill('剁椒'); await page.waitForTimeout(300)
+  await dlg.locator('button[aria-pressed]', { hasText: '示例 剁椒' }).tap(); await page.waitForTimeout(500)
+  ok('合并前说明会发生什么', await dlg.locator('text=合并后').count() > 0)
+  await dlg.locator('label:has-text("原因") input').fill('老板确认：国内采购名和大统华品名是同一个东西')
+  await checkLayout(page, '合并商品')
+  await shot(page, 'sku-02-merge')
+  await dlg.locator('button', { hasText: '确认合并' }).tap(); await page.waitForTimeout(1200)
+  const rows = (await api(page, '/api/inv/stock')).rows
+  const qty = (id) => rows.filter((r) => r.sku_id === id).reduce((t, r) => t + r.on_hand, 0)
+  ok('合并后库存转到保留的商品', qty(b.id) === 30 && qty(a.id) === 0, `${qty(b.id)} / ${qty(a.id)}`)
+  const al = await api(page, `/api/aliases?sku_id=${b.id}`)
+  ok('旧名记成旧称', al.some((x) => x.name === '示例 三樱辣椒段'))
   await page.context().close()
 }
 

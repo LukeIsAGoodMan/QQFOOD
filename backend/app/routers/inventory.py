@@ -96,18 +96,33 @@ def posting_out(db: Session, p: InventoryPosting, duplicate=False):
 
 
 # ---------- master data ----------
-@router.get("/master")
-def master(u: User = Depends(current_user), db: Session = Depends(get_db)):
+def _tnt_map(db: Session) -> dict:
     from ..models import Customer, CustomerItem
     t = db.query(Customer).filter_by(code="TNT").first()
     tnt = {}
     for ci in (db.query(CustomerItem).filter(CustomerItem.customer_id == t.id, CustomerItem.item_no != "").order_by(CustomerItem.updated_at) if t else []):
         tnt.setdefault(ci.sku_id, ci.item_no)
+    return tnt
+
+
+def sku_out(s: Sku, tnt: dict) -> dict:
+    return {"id": s.id, "code": s.code, "name": s.name, "category": s.category, "base_unit": s.base_unit,
+            "conversions": s.conversions, "barcode": s.barcode, "tnt_item_no": tnt.get(s.id, ""),
+            "purchase_pack": s.purchase_pack, "ship_pack": s.ship_pack, "catch_weight": bool(s.catch_weight),
+            "active": s.active is not False, "merged_into": s.merged_into}
+
+
+@router.get("/master")
+def master(include_inactive: bool = False, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """选择列表用：默认只给在用的商品；商品页传 include_inactive=1 看全部。"""
+    tnt = _tnt_map(db)
+    q = db.query(Sku).order_by(Sku.name)
+    if not include_inactive:
+        q = q.filter(Sku.active.isnot(False))
     return {
         "warehouses": [{"id": w.id, "code": w.code, "name": w.name, "kind": w.kind, "tracked": w.tracked, "active": w.active}
                        for w in db.query(Warehouse).order_by(Warehouse.tracked.desc(), Warehouse.name)],
-        "skus": [{"id": s.id, "code": s.code, "name": s.name, "category": s.category, "base_unit": s.base_unit,
-                  "conversions": s.conversions, "barcode": s.barcode, "tnt_item_no": tnt.get(s.id, "")} for s in db.query(Sku).order_by(Sku.name)],
+        "skus": [sku_out(s, tnt) for s in q],
         "lots": [{"id": l.id, "sku_id": l.sku_id, "lot_code": l.lot_code, "expiry": l.expiry,
                   "quality_status": l.quality_status} for l in db.query(Lot).order_by(Lot.lot_code)],
     }
@@ -120,55 +135,164 @@ class SkuIn(BaseModel):
     base_unit: str = "箱"
     conversions: dict = {}
     barcode: str | None = None
+    tnt_item_no: str = ""
+    purchase_pack: float | None = None
+    ship_pack: float | None = None
+
+
+def _check_name(db: Session, name: str, except_id: str | None = None) -> str:
+    from .batches import _norm
+    n = (name or "").strip()
+    if not n:
+        raise HTTPException(400, "品名不能为空")
+    q = db.query(Sku).filter(Sku.active.isnot(False))
+    if except_id:
+        q = q.filter(Sku.id != except_id)
+    twin = next((x for x in q if _norm(x.name) == _norm(n)), None)
+    if twin:
+        raise HTTPException(409, f"已有同名商品「{twin.name}」。如果是同一个东西，用「合并」；不是的话请换个叫法区分（如加规格）")
+    return n
+
+
+def _check_tnt(db: Session, item_no: str, sku_id: str | None):
+    from ..models import Customer, CustomerItem
+    t = db.query(Customer).filter_by(code="TNT").first()
+    ci = t and db.query(CustomerItem).filter_by(customer_id=t.id, item_no=item_no).first()
+    if ci and ci.sku_id != sku_id:
+        other = db.get(Sku, ci.sku_id)
+        raise HTTPException(409, f"大统华 Item# {item_no} 已对到「{other.name if other else ci.sku_id}」。如果两个是同一个东西，用「合并」")
 
 
 @router.post("/skus")
 def create_sku(body: SkuIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
     require(u, "inventory.master")
-    from .batches import _norm, next_sku_code
-    if any(_norm(x.name) == _norm(body.name) for x in db.query(Sku)):
-        raise HTTPException(409, f"已有同名商品「{body.name}」")
+    from .batches import next_sku_code
+    from .orders import set_tnt_item_no
+    body.name = _check_name(db, body.name)
     cat = norm_category(body.category, body.name)
     if cat is None:
         raise HTTPException(400, f"分类需为 {'/'.join(SKU_CATEGORIES)}")
     body.category = cat
     body.code = body.code.strip().upper() or next_sku_code(db)
     if db.query(Sku).filter_by(code=body.code).first():
-        raise HTTPException(409, "SKU 编码已存在")
-    s = Sku(**body.model_dump())
+        raise HTTPException(409, "内部编号已被占用，换一个或留空自动编号")
+    tnt_no = body.tnt_item_no.strip()
+    if tnt_no:
+        _check_tnt(db, tnt_no, None)
+    for k in ("purchase_pack", "ship_pack"):
+        if (getattr(body, k) or 0) < 0:
+            raise HTTPException(400, "箱规不能为负")
+    s = Sku(**body.model_dump(exclude={"tnt_item_no"}), catch_weight=body.base_unit in ("磅", "lb"))
     db.add(s)
-    audit(db, u, "sku.created", "sku", s.id, code=body.code)
+    db.flush()
+    if tnt_no:
+        set_tnt_item_no(db, u, s, tnt_no)
+    audit(db, u, "sku.created", "sku", s.id, code=body.code, name=s.name)
     db.commit()
-    return {"id": s.id}
+    return {"id": s.id, "code": s.code}
 
 
 class SkuPatch(BaseModel):
     category: str | None = None
     name: str | None = None
+    code: str | None = None
+    base_unit: str | None = None
+    barcode: str | None = None
+    tnt_item_no: str | None = None
+    purchase_pack: float | None = None
+    ship_pack: float | None = None
+    active: bool | None = None
+    reason: str = ""   # 停用还有库存的商品时需要
 
 
 @router.patch("/skus/{sid}")
 def patch_sku(sid: str, body: SkuPatch, u: User = Depends(current_user), db: Session = Depends(get_db)):
-    """改分类 / 品名（库存页“补分类”、商品页）。改名不影响库存和历史单据。"""
+    """商品主档：改品名 / 分类 / 内部编号 / 单位 / 箱规 / 大统华 Item#，停用或重新启用。改名不影响库存和历史单据。"""
     require(u, "inventory.master")
-    from .batches import _norm
+    from .. import sku_merge
+    from .orders import set_tnt_item_no
     s = get_or_404(db, Sku, sid, "商品不存在")
-    before = {"category": s.category, "name": s.name}
+    keys = ("name", "category", "code", "base_unit", "barcode", "purchase_pack", "ship_pack", "active")
+    before = {k: getattr(s, k) for k in keys}
+    if s.merged_into and body.active:
+        raise HTTPException(409, "这个商品已经并入别的商品，不能重新启用")
     if body.category is not None:
         cat = norm_category(body.category, s.name)
         if cat is None:
             raise HTTPException(400, f"分类需为 {'/'.join(SKU_CATEGORIES)}")
         s.category = cat
     if body.name is not None and body.name.strip() != s.name:
-        n = body.name.strip()
-        if not n:
-            raise HTTPException(400, "品名不能为空")
-        if any(_norm(x.name) == _norm(n) for x in db.query(Sku).filter(Sku.id != s.id)):
-            raise HTTPException(409, f"已有同名商品「{n}」")
-        s.name = n
-    audit(db, u, "sku.updated", "sku", s.id, before=before, after={"category": s.category, "name": s.name})
+        s.name = _check_name(db, body.name, s.id)
+    if body.code is not None and body.code.strip().upper() != s.code:
+        c = body.code.strip().upper()
+        if not c:
+            raise HTTPException(400, "内部编号不能为空")
+        if db.query(Sku).filter(Sku.code == c, Sku.id != s.id).first():
+            raise HTTPException(409, "内部编号已被占用")
+        s.code = c
+    if body.base_unit is not None and body.base_unit.strip() and body.base_unit.strip() != s.base_unit:
+        if db.query(func.count(InventoryTxn.id)).filter_by(sku_id=s.id).scalar():
+            raise HTTPException(409, f"「{s.name}」已有库存流水，不能直接改单位：新建一个按 {body.base_unit} 记的商品，把库存盘点过去，再把这个停用或合并")
+        s.base_unit = body.base_unit.strip()
+    if s.base_unit in ("磅", "lb"):
+        s.catch_weight = True
+    if body.barcode is not None:
+        s.barcode = body.barcode.strip() or None
+    for k in ("purchase_pack", "ship_pack"):
+        v = getattr(body, k)
+        if v is not None:
+            if v < 0:
+                raise HTTPException(400, "箱规不能为负")
+            setattr(s, k, v or None)
+    if body.tnt_item_no is not None and body.tnt_item_no.strip():
+        new_no = body.tnt_item_no.strip()
+        _check_tnt(db, new_no, s.id)
+        from ..models import Customer, CustomerItem
+        t = db.query(Customer).filter_by(code="TNT").first()
+        cur = t and db.query(CustomerItem).filter(CustomerItem.customer_id == t.id, CustomerItem.sku_id == s.id,
+                                                  CustomerItem.item_no != "").order_by(CustomerItem.updated_at).first()
+        if cur and cur.item_no != new_no:  # 改号：替换原来的 Item#（录错了的情况）
+            before["tnt_item_no"] = cur.item_no
+            cur.item_no = new_no
+        elif not cur:
+            set_tnt_item_no(db, u, s, new_no)
+    if body.active is not None and body.active != (s.active is not False):
+        if not body.active:
+            us = sku_merge.usage(db, s)
+            if (us["has_stock"] or us["reservations"]) and not body.reason.strip():
+                raise HTTPException(409, f"「{s.name}」还有库存或预留（{us['stock']}）。先盘点为 0 / 合并到别的商品；确要停用请写原因")
+        s.active = body.active
+    after = {k: getattr(s, k) for k in keys}
+    audit(db, u, "sku.updated", "sku", s.id, before={k: v for k, v in before.items() if after.get(k) != v},
+          after={k: v for k, v in after.items() if before.get(k) != v}, reason=body.reason or None)
     db.commit()
-    return {"id": s.id, "category": s.category, "name": s.name}
+    return sku_out(s, _tnt_map(db))
+
+
+@router.get("/skus/{sid}/usage")
+def sku_usage(sid: str, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    from .. import sku_merge
+    s = get_or_404(db, Sku, sid, "商品不存在")
+    return sku_merge.usage(db, s)
+
+
+class MergeIn(BaseModel):
+    into_id: str
+    reason: str
+
+
+@router.post("/skus/{sid}/merge")
+def merge_sku(sid: str, body: MergeIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """把这个商品并入另一个（同一个东西被建了两次）。库存转过去，引用改指向，旧名记成旧称。"""
+    require(u, "inventory.master")
+    from .. import sku_merge
+    src = get_or_404(db, Sku, sid, "商品不存在")
+    dst = get_or_404(db, Sku, body.into_id, "保留的商品不存在")
+    if src.merged_into:
+        raise HTTPException(409, "这个商品已经合并过了")
+    r = sku_merge.merge(db, u, src, dst, body.reason)
+    db.commit()
+    return r
 
 
 class SafetyIn(BaseModel):

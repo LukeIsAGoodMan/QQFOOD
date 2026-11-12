@@ -149,7 +149,7 @@ export function StockModule(_: ModProps) {
         </select>
         {can('inventory.post') && <button className="btn-primary" onClick={() => setDlg({ type: 'receive' })}><PackageCheck size={16} />{t('inv.receive')}</button>}
         {can('inventory.master') && <button className="btn-secondary" onClick={() => setDlg({ type: 'warehouses' })}><Warehouse size={16} />仓库与来源地</button>}
-        <button className="btn-secondary" onClick={() => setDlg({ type: 'aliases' })}><Tags size={16} />商品对照</button>
+        <button className="btn-secondary" onClick={() => setDlg({ type: 'aliases' })}><Tags size={16} />商品</button>
         {can('inventory.master') && <button className="btn-secondary" onClick={() => setDlg({ type: 'classify' })}>整理分类</button>}
         <span className="w-full text-xs text-slate-400 sm:ml-auto sm:w-auto">计算于 {ago(stock.data.computed_at)} · 可用 = 实物 − 隔离/待放行 − 预留；未核数不计入</span>
       </div>

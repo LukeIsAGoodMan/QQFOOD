@@ -7,7 +7,7 @@ import { EvidencePanel } from '../components/Evidence'
 
 const ACTION: Record<string, [string, string]> = {
   new: ['新增', 'green'], update: ['修改', 'blue'], set: ['设定数量', 'blue'], unchanged: ['无变化', 'gray'],
-  duplicate: ['疑似重复', 'yellow'], error: ['有错误', 'red'], mapped: ['已配对', 'green'], unmapped: ['未配对 SKU', 'yellow'],
+  duplicate: ['疑似重复', 'yellow'], error: ['有错误', 'red'], mapped: ['已配对', 'green'], unmapped: ['未配对 SKU', 'yellow'], merge: ['合并', 'purple'],
 }
 const ST: Record<string, [string, string]> = { proposed: ['待确认', 'yellow'], applied: ['已全部应用', 'green'], partial: ['部分应用', 'green'], rejected: ['已驳回', 'gray'] }
 const selectable = (a: string) => ['new', 'update', 'set', 'duplicate', 'mapped', 'unmapped'].includes(a)
@@ -33,7 +33,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
   const pickable = ['order', 'inbound', 'stock_count'].includes(b?.kind)
   const master = useLoad(() => (pickable ? get('/api/inv/master') : Promise.resolve(null)), [pickable])
   useEffect(() => { setFill(b?.fill_candidates?.[0]?.id ?? null) }, [b?.fill_candidates])
-  useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set', 'mapped', 'unmapped'].includes(r.action)).map((r: any) => r.index))) }, [b])
+  useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set', 'mapped', 'unmapped', 'merge'].includes(r.action)).map((r: any) => r.index))) }, [b])
   if (!b) return <Spinner />
   const open = b.status === 'proposed'
   const toggle = (i: number) => { const n = new Set(sel); n.has(i) ? n.delete(i) : n.add(i); setSel(n) }

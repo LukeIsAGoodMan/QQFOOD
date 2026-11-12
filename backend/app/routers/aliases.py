@@ -92,7 +92,7 @@ def match_sku_by_name(db: Session, text) -> tuple[Sku | None, str]:
     n = norm_text(text)
     if len(n) < 2:
         return None, ""
-    skus = db.query(Sku).all()
+    skus = db.query(Sku).filter(Sku.active.isnot(False)).all()  # 停用 / 已合并的不参与
     hit = next((s for s in skus if norm_text(s.name) == n), None)
     if hit:
         return hit, "exact"
@@ -236,7 +236,7 @@ def lookup(db: Session, q: str) -> list[dict]:
         return []
     n, c = norm_text(q), _code(q)
     hits: dict[str, dict] = {}
-    for s in db.query(Sku):
+    for s in db.query(Sku).filter(Sku.active.isnot(False)):
         if c == s.code or (s.barcode and q == s.barcode) or (len(n) >= 2 and (n in norm_text(s.code) or n in norm_text(s.name))):
             hits.setdefault(s.id, {"sku": _sku_brief(s), "via": []})
     for x in all_aliases(db):
