@@ -44,7 +44,7 @@ INSTRUCTIONS = (
     "行里直接填对方的 party_code / party_name，系统会按对照换成我们的 SKU，对不上的由用户在确认页选一次并记住。"
     "10) 证据（proof）：每次提交或更新采购、库存、出货、生产、安装结果，工具返回里都有 proof：按 proof.suggested 主动提醒用户上传对应的 PDF / 照片原件，"
     "并给出 proof.upload_url（手机直接传，30 分钟有效）。用户暂时没有就照常提交，在 proof_note 写明缺什么、何时补；不要因为缺证据而不提交，也不要编造证据。"
-    "之后用 list_missing_proof 查还缺原件的单据，用 request_upload_link 生成新链接补传。原件上传后仍需人核验。"
+    "之后用 list_missing_proof 查还缺原件的单据，用 request_upload_link 生成新链接补传；原件先传到了别处（如临时任务）的，单据建好后用 attach_existing_proof 挂过去。原件上传后仍需人核验。"
 )
 
 
@@ -133,6 +133,22 @@ def _to_dt(v: str) -> str:
 
 
 # ---------- read ----------
+@tool("get_daily_brief", "今日摘要", "今天要处理的事：今明要交的单、逾期未发的单、等用户确认的批次、低于安全库存、14 天内到期的 Lot、采购逾期、还缺原件的单据、我逾期的任务。"
+      "用户问“今天有什么事 / 早上摘要”时先调用它，按 headline 一句话概括，再挑最急的几条，附链接。")
+def get_daily_brief(ctx, db):
+    from .. import brief
+    b = brief.build(db, ctx.user)
+    for s in b["sections"]:
+        for it in s["items"]:
+            if it.get("link"):
+                it["link"] = ctx.link(it["link"])
+            for k, v in list(it.items()):
+                if hasattr(v, "isoformat"):
+                    it[k] = v.isoformat()
+    b["generated_at"] = b["generated_at"].isoformat()
+    return b
+
+
 @tool("get_overview", "老板总览", "获取老板总览全部指标：数值、状态(ok/warn/unknown)、统计口径和下钻链接，以及我的待办数量。先调用它回答“今天怎么样/有什么要处理”。")
 def get_overview(ctx, db):
     ms = []
@@ -464,23 +480,53 @@ def verify_upload(token: str) -> dict:
     return d
 
 
+def _resolve_target(db, target_type, target_id) -> str:
+    from ..models import BatchProposal, Lot, ProductionBatch, PurchaseOrder, SalesOrder, Shipment, Transfer
+    model = {"task": Task, "record": BusinessRecord, "po": PurchaseOrder, "so": SalesOrder, "transfer": Transfer, "shipment": Shipment,
+             "production": ProductionBatch, "batch": BatchProposal, "lot": Lot}[target_type]
+    obj = db.get(model, target_id)
+    if not obj and hasattr(model, "code"):
+        obj = db.query(model).filter_by(code=str(target_id).strip().upper()).first()
+    if not obj:
+        raise ToolError(f"{target_type} {target_id} 不存在")
+    return obj.id
+
+
 @tool("request_upload_link", "生成原件上传链接", "生成一个 30 分钟有效的手机上传链接，让用户把照片/PDF 原件直接上传到指定任务、记录或调拨单（作为证据，待核验）。",
       {"target_type": {"type": "string", "enum": ["task", "record", "transfer", "po", "so", "shipment", "production", "batch", "lot"],
                        "description": "batch=之前提交的批次（确认后自动挂到生成的调入单/订单）；shipment=发货记录（签收单）；production=生产记录；lot=批次标签"},
        "target_id": {"type": "string", "description": "id；采购单/订单/发货/生产/批次也可用单号（PO-…、SO-…、SH-…、PB-…、BT-…）"},
        "purpose": {"type": "string", "description": "用途，如 签收单、安装后照片、发票、付款证明、整改证明"}}, ["target_type", "target_id"], tier="write")
 def request_upload_link(ctx, db, target_type, target_id, purpose="附件"):
-    from ..models import BatchProposal, Lot, ProductionBatch, PurchaseOrder, SalesOrder, Shipment, Transfer
-    model = {"task": Task, "record": BusinessRecord, "po": PurchaseOrder, "so": SalesOrder, "transfer": Transfer, "shipment": Shipment,
-             "production": ProductionBatch, "batch": BatchProposal, "lot": Lot}[target_type]
-    obj = db.get(model, target_id)
-    if not obj and hasattr(model, "code"):
-        obj = db.query(model).filter_by(code=target_id.strip().upper()).first()
-    if not obj:
-        raise ToolError("目标不存在")
-    target_id = obj.id
+    target_id = _resolve_target(db, target_type, target_id)
     return {"upload_url": ctx.link(f"/u/{sign_upload(ctx.user.id, target_type, target_id, purpose)}"), "expires_in_minutes": 30,
             "purpose": purpose, "note": "上传后为“未核验”证据，需由他人核验。"}
+
+
+@tool("attach_existing_proof", "把已传的原件挂到单据上", "原件先传到了别处（如为了收原件临时建的任务“2602柜入库凭证”），后来对应的单据建好了（盘点 / 调入批次、调入单、订单、发货、采购单、生产记录）："
+      "把来源上的原件同时挂到目标上（不重复上传，来源上的也保留）。挂到批次的，批次确认后会自动挂到生成的订单 / 调入单。挂上后仍是“未核验”。",
+      {"from_type": {"type": "string", "enum": ["task", "record", "batch", "transfer", "so", "po", "shipment", "production"]},
+       "from_id": {"type": "string", "description": "id 或单号（任务用 id）"},
+       "to_type": {"type": "string", "enum": ["batch", "transfer", "so", "po", "shipment", "production", "record", "task", "lot"]},
+       "to_id": {"type": "string", "description": "id 或单号（BT-… / TR-… / SO-… / PO-… / SH-… / PB-…）"},
+       "purpose": {"type": "string", "description": "可空=沿用原来的用途（如 BOL、签收单）"}},
+      ["from_type", "from_id", "to_type", "to_id"], tier="write")
+def attach_existing_proof(ctx, db, from_type, from_id, to_type, to_id, purpose=None):
+    from ..models import EvidenceLink, EvidenceVersion, Evidence
+    from ..core import can_read_evidence
+    src_id, dst_id = _resolve_target(db, from_type, from_id), _resolve_target(db, to_type, to_id)
+    n = 0
+    for l in db.query(EvidenceLink).filter_by(target_type=from_type, target_id=src_id, active=True):
+        ev = db.get(Evidence, l.evidence_id)
+        if not can_read_evidence(ctx.user, ev.sensitivity):
+            continue
+        ev_r.create_link(db, ctx.user, db.get(EvidenceVersion, l.evidence_version_id), to_type, dst_id, purpose or l.purpose)
+        n += 1
+    if not n:
+        raise ToolError("来源上没有原件（或你无权读取）")
+    db.commit()
+    return {"attached": n, "to": ev_r.target_label(db, to_type, dst_id), "from": ev_r.target_label(db, from_type, src_id),
+            "note": "已挂上，仍为“未核验”，需由人在系统里核验；来源上的原件保留。"}
 
 
 @tool("list_missing_proof", "还缺原件的单据", "列出最近还没有任何原件（PDF/照片）的单据：ChatGPT 提交的盘点/调入/订单批次、发货（签收单）、调入单、采购单、生产记录、设备安装记录。"
@@ -531,6 +577,9 @@ def _batch_reply(ctx, b, db):
             "summary_legend": {"new": "新增", "update": "修改", "set": "将设定数量", "unchanged": "无变化", "duplicate": "疑似重复（默认不勾）", "error": "有错误（不能确认）",
                                "mapped": "已按对照对上", "unmapped": "未对上我们的 SKU（用户在确认页选一次即记住）"},
             "errors": errs, "warnings": warns, "confirm_url": ctx.link(f"/ingest?batch={b.id}"),
+            **({"possible_duplicates": [{"row": r["index"] + 1, "key": r["key"]} for r in d["rows"] if r.get("suspect")],
+                "note_for_ai_dup": "这些行可能和调入单 / 待确认调入重复入库（实盘和调入只能录一边），默认不勾；请向用户说明并问清楚这批货是否已在实盘里。"}
+               if any(r.get("suspect") for r in d["rows"]) else {}),
             "message": "已提交为待确认批次，尚未生效。请用户打开 confirm_url 勾选确认。若有错误行，可修正后另提一批。",
             **({"proof": proof.block(ctx, db, b.kind, "batch", b.id, (b.meta or {}).get("proof_note", ""))} if b.kind in proof.GUIDE else {}),
             **({"possible_earlier_delivery": [{k: c[k] for k in ("code", "required_date", "lines")} for c in d["fill_candidates"]],

@@ -140,12 +140,14 @@ function LibraryPicker({ open, onClose, onPick }: { open: boolean; onClose: () =
   const { data } = useLoad(() => (open ? get(`/api/evidence/library?q=${encodeURIComponent(q)}`) : Promise.resolve([])), [open, q])
   return (
     <Modal open={open} onClose={onClose} title={t('ev.pick')}>
-      <input className="input mb-3" placeholder={t('common.search')} value={q} onChange={(e) => setQ(e.target.value)} />
+      <input className="input mb-1" type="search" placeholder="搜文件名，或它挂的任务 / 单据（如 2602、BOL）" value={q} onChange={(e) => setQ(e.target.value)} />
+      <p className="mb-3 text-xs text-slate-400">选中的原件同时挂到这里，原来挂的地方保留，不用重新上传。</p>
       <div className="space-y-1">
         {(data || []).map((e: any) => (
           <button key={e.evidence_id} onClick={() => onPick(e.evidence_id)} className="flex w-full items-center gap-3 rounded p-2 text-left hover:bg-slate-50">
             {e.url ? <img src={e.url} className="h-10 w-10 rounded object-cover" alt="" /> : <FileText className="h-10 w-10 p-2 text-slate-400" />}
-            <div className="min-w-0 flex-1"><div className="truncate text-sm">{e.title}</div><div className="text-xs text-slate-400">{dt(e.uploaded_at)} {e.sensitivity !== 'normal' && `· ${e.sensitivity}`}</div></div>
+            <div className="min-w-0 flex-1"><div className="truncate text-sm">{e.title}</div><div className="text-xs text-slate-400">{dt(e.uploaded_at)} {e.sensitivity !== 'normal' && `· ${e.sensitivity}`}</div>
+              {e.where?.length > 0 && <div className="truncate text-xs text-slate-500">挂在：{e.where.join('；')}</div>}</div>
           </button>
         ))}
         {data && !data.length && <Empty />}

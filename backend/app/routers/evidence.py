@@ -170,18 +170,36 @@ def list_for_target(target_type: str, target_id: str, include_inactive: bool = F
     return [link_out(db, l, u, names) for l in q.order_by(EvidenceLink.created_at)]
 
 
+TARGET_LABEL = {"task": "任务", "record": "记录", "transfer": "调入单", "po": "采购单", "so": "订单", "shipment": "发货",
+                "batch": "批次", "production": "生产", "lot": "Lot", "posting": "入库", "contact": "联系人", "note": "笔记",
+                "checklist_run": "检查表", "ingest": "资料中心"}
+
+
+def target_label(db: Session, ttype: str, tid: str) -> str:
+    """证据挂在哪里（给人看的）：任务「2602柜入库凭证」、调入单 TR-…"""
+    from ..models import (BatchProposal, BusinessRecord, Lot, ProductionBatch, PurchaseOrder, SalesOrder, Shipment, Task,
+                          Transfer)
+    model = {"task": Task, "record": BusinessRecord, "transfer": Transfer, "po": PurchaseOrder, "so": SalesOrder, "shipment": Shipment,
+             "batch": BatchProposal, "production": ProductionBatch, "lot": Lot}.get(ttype)
+    obj = db.get(model, tid) if model else None
+    name = (getattr(obj, "title", None) or getattr(obj, "code", None) or getattr(obj, "lot_code", None)) if obj else None
+    return f"{TARGET_LABEL.get(ttype, ttype)}「{name}」" if name else TARGET_LABEL.get(ttype, ttype)
+
+
 @router.get("/evidence/library")
 def library(q: str = "", limit: int = 40, u: User = Depends(current_user), db: Session = Depends(get_db)):
-    qry = db.query(Evidence)
-    if q:
-        qry = qry.filter(Evidence.title.ilike(f"%{q}%"))
-    out = []
-    for ev in qry.order_by(Evidence.created_at.desc()).limit(200):
+    """资料库：最近的原件，带“挂在哪里”；搜索也匹配所挂任务 / 单据的名字（如搜 2602 找到 2602 柜任务上的照片）。"""
+    out, n = [], q.strip().lower()
+    for ev in db.query(Evidence).order_by(Evidence.created_at.desc()).limit(400):
         if not can_read_evidence(u, ev.sensitivity):
             continue
         ver = db.get(EvidenceVersion, ev.current_version_id)
+        links = db.query(EvidenceLink).filter_by(evidence_id=ev.id, active=True).filter(EvidenceLink.target_type != "ingest").all()
+        where = [f"{target_label(db, l.target_type, l.target_id)} · {l.purpose}" for l in links][:4]
+        if n and n not in (ev.title or "").lower() and n not in (ver.filename or "").lower() and not any(n in w.lower() for w in where):
+            continue
         out.append({"evidence_id": ev.id, "title": ev.title, "filename": ver.filename, "mime": ver.mime,
-                    "uploaded_at": ver.uploaded_at, "sensitivity": ev.sensitivity,
+                    "uploaded_at": ver.uploaded_at, "sensitivity": ev.sensitivity, "where": where,
                     "url": sign_file(ver.id, u.id) if ver.mime.startswith("image/") else None})
         if len(out) >= limit:
             break
