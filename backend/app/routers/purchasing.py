@@ -28,7 +28,7 @@ SIGNOFF_PURPOSES = ["签收单", "收据", "到货照片", "发货单"]
 DOC_PURPOSES = {"invoice": ["发票"], "receipt": ["收据", "发票"], "none": []}
 PAY_PURPOSES = ["付款证明", "收据"]
 DOC_LABEL = {"invoice": "发票", "receipt": "收据", "none": "无票据"}
-LOT_REQUIRED_CATEGORIES = {"原料", "包材", "成品"}  # 食品相关物料必须有 Lot（追溯）；耗材可不填
+from ..categories import FOOD as LOT_REQUIRED_CATEGORIES  # 食品（干货/冻货/原料肉/原料菜）必须有 Lot（追溯）；用品、机器可不填
 OPEN_STATUSES = ["draft", "pending_approval", "approved", "ordered", "partial"]
 STATUS_LABEL = {"draft": "草稿", "pending_approval": "待审批", "approved": "已批准", "rejected": "已驳回", "ordered": "已下单",
                 "partial": "部分到货", "received": "已到齐", "closed": "已关闭", "cancelled": "已取消"}

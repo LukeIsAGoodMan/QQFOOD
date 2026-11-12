@@ -245,7 +245,7 @@ class Sku(Base):
     id: Mapped[str] = _id("sku")
     code: Mapped[str] = mapped_column(String(64), unique=True)
     name: Mapped[str] = mapped_column(String(200))
-    category: Mapped[str] = mapped_column(String(40), default="原料")  # 原料 包材 成品 耗材
+    category: Mapped[str] = mapped_column(String(40), default="未分类")  # 干货 冻货 原料肉 原料菜 生产用品 公司用品 生产机器（见 categories.py）
     base_unit: Mapped[str] = mapped_column(String(16), default="箱")
     conversions: Mapped[dict] = mapped_column(JSON, default=dict)  # {"磅": 20} => 1 base unit = 20 lb
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)

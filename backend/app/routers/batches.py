@@ -22,7 +22,7 @@ from .inventory import Dup, TLineIn, TransferIn, balance, begin_posting, create_
 router = APIRouter(prefix="/api/batches", tags=["batches"])
 
 SITE_TZ = ZoneInfo("America/Los_Angeles")
-SKU_CATEGORIES = ["原料", "包材", "成品", "耗材"]
+from ..categories import SKU_CATEGORIES, UNCATEGORIZED, FOOD, normalize as norm_category
 KIND_LABEL = {"sku_upsert": "商品主档", "stock_count": "期初 / 盘点数量", "inbound": "调入（外库 / 公司）", "order": "客户订单（PO）",
               "alias_upsert": "商品对照（一物多码）"}
 KIND_PERM = {"sku_upsert": "inventory.master", "stock_count": "inventory.post", "inbound": "inventory.transfer", "order": "order.manage",
@@ -70,8 +70,9 @@ def _analyze_sku(db: Session, rows: list[dict]):
         elif ident in seen:
             res["messages"].append("本批重复")
         seen.add(ident)
-        cat = r.get("category") or ("原料" if code not in skus else skus[code].category)
-        if cat not in SKU_CATEGORIES:
+        given = r.get("category")
+        cat = norm_category(given, name or (skus[code].name if code in skus else "")) if given else (skus[code].category if code in skus else UNCATEGORIZED)
+        if cat is None:
             res["messages"].append(f"分类需为 {'/'.join(SKU_CATEGORIES)}")
         conv = r.get("conversions") or {}
         if not isinstance(conv, dict) or any(not isinstance(v, (int, float)) or v <= 0 for v in conv.values()):
@@ -111,6 +112,8 @@ def _analyze_sku(db: Session, rows: list[dict]):
                 if not ss or ss.qty != q:
                     res["changes"][f"安全库存@{w.code}"] = [ss.qty if ss else None, q]
             res["action"] = "update" if res["changes"] else "unchanged"
+            if cat == UNCATEGORIZED:
+                res["messages"].append("还没分类（确认后可在库存页补）")
         else:
             if not r.get("name"):
                 res["messages"].append("新 SKU 需要名称")
@@ -125,6 +128,8 @@ def _analyze_sku(db: Session, rows: list[dict]):
                                                          "ship_pack": r.get("ship_pack")}.items() if v not in (None, {}, "")}}
             if not code:
                 res["messages"].append("没给编码：系统自动编号，平时按品名和大统华 Item# 认")
+            if cat == UNCATEGORIZED:
+                res["messages"].append("还没分类（确认后可在库存页补）")
             for wc, q in (r.get("safety_stock") or {}).items():
                 res["changes"][f"安全库存@{str(wc).upper()}"] = [None, q]
         out.append(res)
@@ -237,7 +242,7 @@ def _stock_changes(db, res, sku, w, lot_code, qty, counted):
         res["changes"]["未核数（估计）"] = [cur_unv, qty]
     moved = any(k in res["changes"] for k in ("实物", "未核数", "未核数（估计）"))
     res.update({"action": "set" if moved else "unchanged", "unit": sku.base_unit, "qty_base": qty, "counted": counted})
-    if not lot_code and sku.category in ("原料", "包材", "成品"):
+    if not lot_code and sku.category in FOOD:
         res["messages"].append("无 Lot（可确认，追溯时会缺批次）")
 
 
@@ -596,7 +601,7 @@ def apply(bid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
             sku = db.query(Sku).filter_by(code=code).first()
             if not sku:
                 bu = r.get("base_unit") or "箱"
-                sku = Sku(code=code, name=r["name"], category=r.get("category") or "原料", base_unit=bu,
+                sku = Sku(code=code, name=r["name"], category=(a["changes"].get("category") or [None, UNCATEGORIZED])[1], base_unit=bu,
                           conversions=r.get("conversions") or {}, barcode=r.get("barcode"), purchase_pack=r.get("purchase_pack"),
                           ship_pack=r.get("ship_pack"), catch_weight=bu in ("磅", "lb"))
                 db.add(sku)

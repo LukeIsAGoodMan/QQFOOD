@@ -589,6 +589,31 @@ let exceptionTaskId
   await page.context().close()
 }
 
+// ---------- 14. 库存分类：干货/冻货/原料肉/原料菜/生产用品/公司用品/生产机器 → 按分类筛选 → 未分类的点一下补上 ----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => (await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined })).json(), [path, body, method])
+  const glove = await call('/api/inv/skus', { name: '示例 一次性手套', base_unit: '盒' })
+  await page.goto(`${BASE}/inventory`); await page.waitForTimeout(1500)
+  const visible = (txt) => page.evaluate((t) => [...document.querySelectorAll('main *')].filter((e) => e.children.length === 0 && e.textContent.trim() === t && e.offsetParent !== null).length, txt)
+  ok('库存页有分类筛选', await page.locator('[aria-label="按分类筛选"] button', { hasText: '冻货' }).count() === 1 && await page.locator('[aria-label="按分类筛选"] button', { hasText: '干货' }).count() === 1)
+  await page.locator('[aria-label="按分类筛选"] button', { hasText: '冻货' }).tap(); await page.waitForTimeout(400)
+  ok('点「冻货」只看冻货', await visible('示例 切粒鸡丁') > 0 && await visible('示例 成品汤料') === 0)
+  await checkLayout(page, '库存按分类筛选')
+  await shot(page, 'cat-01-filter')
+  ok('有未分类商品时提示去分类', await page.locator('button', { hasText: '还没分类' }).count() === 1)
+  await page.locator('button', { hasText: '还没分类' }).tap(); await page.waitForTimeout(600)
+  const dlg = page.locator('div[role=dialog]').last()
+  const card = dlg.locator('[role=group][aria-label="示例 一次性手套"]')
+  await checkLayout(page, '整理分类')
+  await shot(page, 'cat-02-classify')
+  await card.locator('button', { hasText: '生产用品' }).tap(); await page.waitForTimeout(700)
+  const after = (await api(page, '/api/inv/master')).skus.find((s) => s.id === glove.id)
+  ok('点一下就归类保存', after?.category === '生产用品', after?.category)
+  await dlg.locator('button', { hasText: '完成' }).tap(); await page.waitForTimeout(800)
+  await page.context().close()
+}
+
 await browser.close()
 const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} 通过；页面脚本错误 ${pageErrors.length} 个；截图在 e2e/screenshots/`)

@@ -3,6 +3,7 @@ import { ArrowLeft, Pencil, Plus, Trash2 } from 'lucide-react'
 import { del, get, post, put } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { Badge, Empty, Field, Modal, Spinner, errMsg, useLoad, useToast } from '../components/ui'
+import { CatBadge, CategoryPicker, saveCategory } from './categories'
 
 const KIND_COLOR: Record<string, string> = { customer: 'blue', warehouse: 'purple', supplier: 'green', accounting: 'yellow', other: 'gray' }
 const SHORT: Record<string, string> = { customer: '客户', warehouse: '外库', supplier: '供应商', accounting: 'QB', other: '旧称' }
@@ -29,7 +30,7 @@ export function AliasManager({ skuId, onClose }: { skuId?: string; onClose: () =
   const sku = sel && master.data.skus.find((s: any) => s.id === sel)
   return (
     <Modal open onClose={onClose} wide title={sku ? <button className="-ml-2 flex min-h-11 items-center gap-1 rounded px-2 hover:bg-slate-50" onClick={() => setSel(null)} aria-label="返回列表"><ArrowLeft size={18} />返回</button> : '商品对照（一物多码）'}>
-      {sku ? <SkuAliases sku={sku} rows={bySku[sku.id] || []} onChanged={all.reload} /> : (
+      {sku ? <SkuAliases sku={sku} rows={bySku[sku.id] || []} onChanged={all.reload} onSkuChanged={master.reload} /> : (
         <div className="space-y-3">
           <p className="text-sm text-slate-600">商品以<b>我们的品名</b>为主，大统华 Item# 作补充编号；库存只记这一个商品。大统华 Item#、外库（Supreme）代码、供应商编码、QuickBooks 品名都挂在对应 SKU 下面；单据进来时自动认出，确认页里选过一次的也会记住。</p>
           <input className="input" type="search" placeholder="搜品名，或任何一方的编码（538949、Vatee-001…）" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -38,7 +39,7 @@ export function AliasManager({ skuId, onClose }: { skuId?: string; onClose: () =
               const list = bySku[s.id] || []
               return (
                 <button key={s.id} className="w-full rounded-lg border border-slate-200 p-3 text-left hover:bg-slate-50" onClick={() => setSel(s.id)}>
-                  <div className="flex items-baseline gap-2"><span className="min-w-0 flex-1 truncate font-semibold">{s.name}</span>{s.tnt_item_no && <span className="font-mono text-sm">T&amp;T {s.tnt_item_no}</span>}<span className="text-xs text-slate-400">{s.base_unit}</span></div>
+                  <div className="flex items-baseline gap-2"><span className="min-w-0 flex-1 truncate font-semibold">{s.name}</span><CatBadge c={s.category} />{s.tnt_item_no && <span className="font-mono text-sm">T&amp;T {s.tnt_item_no}</span>}<span className="text-xs text-slate-400">{s.base_unit}</span></div>
                   <div className="mt-1 flex flex-wrap gap-1">
                     {list.map((a) => <Badge key={a.id} color={KIND_COLOR[a.party_kind]}>{SHORT[a.party_kind]} {a.party_kind === 'accounting' ? a.name || a.code : a.code || a.name}</Badge>)}
                     {!list.length && <span className="text-xs text-slate-400">还没有对照</span>}
@@ -56,7 +57,7 @@ export function AliasManager({ skuId, onClose }: { skuId?: string; onClose: () =
 
 const EMPTY = { party_kind: 'warehouse', party: '', code: '', name: '', pack_size: '', unit: '', factor: '' }
 
-function SkuAliases({ sku, rows, onChanged }: { sku: any; rows: Alias[]; onChanged: () => void }) {
+function SkuAliases({ sku, rows, onChanged, onSkuChanged }: { sku: any; rows: Alias[]; onChanged: () => void; onSkuChanged: () => void }) {
   const { can } = useAuth()
   const toast = useToast()
   const parties = useLoad(() => get('/api/aliases/parties'), [])
@@ -71,9 +72,11 @@ function SkuAliases({ sku, rows, onChanged }: { sku: any; rows: Alias[]; onChang
     try { await del(`/api/aliases/${a.id}`); onChanged() } catch (e) { toast(errMsg(e), 'err') }
   }
   const opts = parties.data?.[f?.party_kind] || []
+  const setCat = async (c: string) => { try { await saveCategory(sku.id, c); toast(`已归为${c}`); onSkuChanged() } catch (e) { toast(errMsg(e), 'err') } }
   return (
     <div className="space-y-3">
       <div><div className="text-lg font-semibold">{sku.name}</div><div className="text-xs text-slate-500">{sku.tnt_item_no ? `大统华 Item# ${sku.tnt_item_no} · ` : '还没有大统华 Item#（看到 PO 会自动补上）· '}基本单位 {sku.base_unit} · 内部编号 {sku.code}</div></div>
+      <div><div className="mb-1 flex items-center gap-2 text-sm font-medium">分类 <CatBadge c={sku.category} /></div>{can('inventory.master') && <CategoryPicker value={sku.category} onPick={setCat} />}</div>
       <div className="space-y-2">
         {rows.map((a) => (
           <div key={a.id} className="flex items-start gap-2 rounded-lg border border-slate-200 p-3 text-sm">
