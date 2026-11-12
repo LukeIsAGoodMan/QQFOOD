@@ -55,7 +55,7 @@ def recipe_out(db, r: Recipe):
 # ---------- master data: packs & recipes ----------
 @router.get("/setup")
 def setup(u: User = Depends(current_user), db: Session = Depends(get_db)):
-    return {"skus": [_sku_out(s) for s in db.query(Sku).order_by(Sku.code)],
+    return {"skus": [_sku_out(s) for s in db.query(Sku).filter(Sku.active.isnot(False)).order_by(Sku.name)],
             "recipes": [recipe_out(db, r) for r in db.query(Recipe)]}
 
 

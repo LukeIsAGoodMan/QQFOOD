@@ -24,9 +24,9 @@ router = APIRouter(prefix="/api/batches", tags=["batches"])
 SITE_TZ = ZoneInfo("America/Los_Angeles")
 from ..categories import SKU_CATEGORIES, UNCATEGORIZED, FOOD, normalize as norm_category
 KIND_LABEL = {"sku_upsert": "商品主档", "stock_count": "期初 / 盘点数量", "inbound": "调入（外库 / 公司）", "order": "客户订单（PO）",
-              "alias_upsert": "商品对照（一物多码）"}
+              "alias_upsert": "商品对照（一物多码）", "sku_merge": "合并商品"}
 KIND_PERM = {"sku_upsert": "inventory.master", "stock_count": "inventory.post", "inbound": "inventory.transfer", "order": "order.manage",
-             "alias_upsert": "inventory.master"}
+             "alias_upsert": "inventory.master", "sku_merge": "inventory.master"}
 MAX_ROWS = 300
 
 
@@ -473,7 +473,58 @@ def _analyze_order(db: Session, meta: dict, rows: list[dict]):
     return out, cust, site
 
 
+def find_sku_any(db: Session, text) -> Sku | None:
+    """按我们的品名 / 内部编号 / 大统华 Item# / 任何一方记过的编码或品名找在用的商品（唯一才算）。"""
+    from ..models import CustomerItem, SkuAlias
+    t = str(text or "").strip()
+    if not t:
+        return None
+    act = [x for x in db.query(Sku).filter(Sku.active.isnot(False))]
+    hit = [x for x in act if x.code == t.upper() or _norm(x.name) == _norm(t)]
+    if len(hit) == 1:
+        return hit[0]
+    ids = {c.sku_id for c in db.query(CustomerItem) if c.item_no and c.item_no.strip() == t}
+    ids |= {a.sku_id for a in db.query(SkuAlias) if (a.code and _norm(a.code) == _norm(t)) or (a.name and _norm(a.name) == _norm(t))}
+    ids &= {x.id for x in act}
+    return db.get(Sku, ids.pop()) if len(ids) == 1 else None
+
+
+def _analyze_merge(db: Session, rows: list[dict]):
+    from .. import sku_merge
+    out, seen = [], set()
+    for r in rows:
+        f, t = str(r.get("from") or "").strip(), str(r.get("into") or "").strip()
+        res = {"key": f"{f} → {t}", "action": "error", "messages": [], "changes": {}}
+        src, dst = find_sku_any(db, f), find_sku_any(db, t)
+        if not src:
+            res["messages"].append(f"找不到在用的商品「{f}」（只是国内叫法不同、没建成商品的话，用商品对照记下就行，不用合并）")
+        if not dst:
+            res["messages"].append(f"找不到在用的商品「{t}」")
+        if not str(r.get("reason") or "").strip():
+            res["messages"].append("缺少合并原因")
+        if src and dst:
+            res["messages"] += sku_merge.check(db, src, dst)
+            if src.id in seen:
+                res["messages"].append("本批重复")
+            seen.add(src.id)
+        if not res["messages"]:
+            us = sku_merge.usage(db, src)
+            res["action"] = "merge"
+            res["src_id"], res["dst_id"] = src.id, dst.id
+            res["changes"] = {"并入": [src.name, dst.name]}
+            if us["has_stock"]:
+                res["changes"]["库存转过去"] = [None, "、".join(f"{ {'on_hand': '实物', 'in_transit': '在途', 'unverified': '未核数'}.get(k, k)} {v}" for k, v in us["stock"].items())]
+            refs = [f"{n} {lab}" for lab, n in (("订单行", us["order_lines"]), ("采购行", us["po_lines"]), ("调拨行", us["transfer_lines"]), ("对照", us["aliases"])) if n]
+            if refs:
+                res["changes"]["改指向"] = [None, "、".join(refs)]
+            res["messages"].append(f"合并后「{src.name}」停用，它的品名 / 编号记成「{dst.name}」的旧称，以后单据上出现照样认得出")
+        out.append(res)
+    return out
+
+
 def analyze(db: Session, b: BatchProposal):
+    if b.kind == "sku_merge":
+        return _analyze_merge(db, b.rows)
     if b.kind == "order":
         return _analyze_order(db, b.meta, b.rows)[0]
     if b.kind == "sku_upsert":
@@ -650,6 +701,21 @@ def apply(bid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
                 txn(db, p, sku.id, w.id, "on_hand", qty_b - on, lot_id)
             else:
                 txn(db, p, sku.id, w.id, "unverified", qty_b - unv, lot_id)
+            applied.append(i)
+    elif b.kind == "sku_merge":
+        from .. import sku_merge
+        for i in chosen:
+            a, r = an[i], b.rows[i]
+            if a["action"] != "merge":
+                skipped.append(i)
+                continue
+            try:
+                res = sku_merge.merge(db, u, db.get(Sku, a["src_id"]), db.get(Sku, a["dst_id"]), str(r.get("reason")), source=b.source)
+            except HTTPException as e:
+                a["messages"].append(str(e.detail))
+                skipped.append(i)
+                continue
+            b.result = {**(b.result or {}), "merged": (b.result or {}).get("merged", []) + [f"{res['from']['name']} → {res['into']['name']}"]}
             applied.append(i)
     elif b.kind == "alias_upsert":
         from . import aliases as al

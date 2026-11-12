@@ -253,6 +253,8 @@ class Sku(Base):
     # 包装规格只是参数，随时可改（换供应商、换箱子）；历史单据保留当时的数字
     purchase_pack: Mapped[float | None] = mapped_column(Float, nullable=True)  # 采购：供应商每箱多少基本单位（如 鸡腿肉 40 磅/箱）
     ship_pack: Mapped[float | None] = mapped_column(Float, nullable=True)      # 出货：每箱目标量（如 鸡丁 50 磅/箱）
+    active: Mapped[bool] = mapped_column(Boolean, default=True)   # 停用 / 已合并的商品不出现在选择列表里，历史照常可查
+    merged_into: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class SafetyStock(Base):

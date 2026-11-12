@@ -40,7 +40,7 @@ INSTRUCTIONS = (
     "propose_inbound 批量提交（每批 ≤300 行，SKU 先于库存）；它们都只生成待确认批次，必须让用户打开 confirm_url 确认。"
     "不要再单独维护另一份库存表。"
     "9) 一物多码：商品以品名为主（我们自己的叫法），大统华 Item# 作为补充编号；内部编码可以不给，系统自动编号。库存只记我们自己的商品。大统华 Item#、外库（如 Supreme：Vatee-001）、供应商编码、QuickBooks 品名都是“对照”，"
-    "不要为它们新建 SKU。先用 list_item_aliases 查；没有就用 propose_item_aliases 提交对照。外库 BOL / 调货单用 propose_inbound，"
+    "不要为它们新建 SKU（国内采购名和大统华品名不同但是同一个东西时，记供应商对照）。已经重复建成两个商品的，用户确认后用 propose_sku_merge 合并。先用 list_item_aliases 查；没有就用 propose_item_aliases 提交对照。外库 BOL / 调货单用 propose_inbound，"
     "行里直接填对方的 party_code / party_name，系统会按对照换成我们的 SKU，对不上的由用户在确认页选一次并记住。"
     "10) 证据（proof）：每次提交或更新采购、库存、出货、生产、安装结果，工具返回里都有 proof：按 proof.suggested 主动提醒用户上传对应的 PDF / 照片原件，"
     "并给出 proof.upload_url（手机直接传，30 分钟有效）。用户暂时没有就照常提交，在 proof_note 写明缺什么、何时补；不要因为缺证据而不提交，也不要编造证据。"
@@ -508,7 +508,7 @@ def get_master_data(ctx, db, query=None):
     ss = {}
     for x in db.query(SafetyStock):
         ss.setdefault(x.sku_id, {})[whs[x.warehouse_id].code] = x.qty
-    skus = db.query(Sku).order_by(Sku.code).all()
+    skus = db.query(Sku).filter(Sku.active.isnot(False)).order_by(Sku.code).all()  # 停用 / 已合并的不给
     if query:
         skus = [s for s in skus if query.lower() in s.code.lower() or query in s.name]
     from ..routers import aliases as al_r
@@ -614,6 +614,20 @@ def propose_item_aliases(ctx, db, rows, source_summary):
 
 
 # ---------- customer orders (大统华 PO 等) ----------
+@tool("propose_sku_merge", "合并重复商品", "同一个东西被建成了两个商品时（如国内采购名“三樱辣椒段”和卖给大统华的“剁椒”都建了商品），提出合并。"
+      "rows 每行：from（要并掉的商品：品名 / 内部编号 / 大统华 Item#）、into（保留的商品）、reason（为什么是同一个东西，如“用户确认：国内采购名与大统华品名为同一商品”）。"
+      "合并后库存转到保留商品，订单 / 采购 / 对照改指向，被并商品停用，旧名记成旧称。"
+      "注意：如果只是叫法不同、另一个名字并没有建成商品，用 propose_item_aliases 记对照即可，不要合并。只有用户明确确认是同一个东西才提出。不会直接生效。",
+      {"rows": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object"}}, "source_summary": {"type": "string"}},
+      ["rows", "source_summary"], tier="propose")
+def propose_sku_merge(ctx, db, rows, source_summary):
+    b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="sku_merge", rows=rows, source_note=source_summary), source=f"agent:{ctx.client}")
+    db.commit()
+    out = _batch_reply(ctx, b, db)
+    out["summary_legend"]["merge"] = "将合并"
+    return out
+
+
 @tool("list_customers", "客户与品项对照", "列出客户（如大统华 TNT）、送货点（门店/中央厨房）和已记住的品项对照（客户 Item#/品名 → 我们的 SKU 与换算）。录订单前可先看。",
       {"customer": {"type": "string", "description": "可选：客户名或编码"}})
 def list_customers(ctx, db, customer=None):
