@@ -21,13 +21,15 @@ def _ensure_columns():
     adds = {"users": [("agent_enabled", "BOOLEAN NOT NULL DEFAULT 0")],
             "warehouses": [("tracked", "BOOLEAN NOT NULL DEFAULT 1"), ("active", "BOOLEAN NOT NULL DEFAULT 1")],
             "skus": [("catch_weight", "BOOLEAN NOT NULL DEFAULT 0"), ("purchase_pack", "FLOAT"), ("ship_pack", "FLOAT"),
-                     ("active", "BOOLEAN NOT NULL DEFAULT 1"), ("merged_into", "VARCHAR(32)")],
+                     ("active", "BOOLEAN NOT NULL DEFAULT 1"), ("merged_into", "VARCHAR(32)"),
+                     ("usage", "VARCHAR(16) NOT NULL DEFAULT ''"), ("twin_id", "VARCHAR(32)")],
             "production_batches": [("order_id", "VARCHAR(32)"), ("consumed_qty", "FLOAT"), ("loss_qty", "FLOAT"), ("yield_pct", "FLOAT"),
                                    ("expected_yield_pct", "FLOAT"), ("loss_reason", "VARCHAR(300) NOT NULL DEFAULT ''"),
                                    ("boxes", "INTEGER NOT NULL DEFAULT 0")],
             "customers": [("accounting_name", "VARCHAR(200) NOT NULL DEFAULT ''")],
             "purchase_orders": [("doc_type", "VARCHAR(16) NOT NULL DEFAULT 'invoice'"), ("exceptions", "JSON NOT NULL DEFAULT '[]'"),
-                                ("quick", "BOOLEAN NOT NULL DEFAULT 0")]}
+                                ("quick", "BOOLEAN NOT NULL DEFAULT 0"), ("purchase_date", "VARCHAR(10)"),
+                                ("payment_method", "VARCHAR(20) NOT NULL DEFAULT ''"), ("paid_by", "VARCHAR(100) NOT NULL DEFAULT ''")]}
     with engine.begin() as conn:
         for table, cols in adds.items():
             if not insp.has_table(table):
@@ -67,6 +69,8 @@ async def lifespan(_app):
     upgrade_categories()
     from .seed import upgrade_brief
     upgrade_brief()
+    from .seed import upgrade_usage
+    upgrade_usage()
     _load_org_mode()
     import asyncio
     import os

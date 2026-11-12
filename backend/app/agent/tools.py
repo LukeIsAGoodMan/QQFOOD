@@ -45,6 +45,8 @@ INSTRUCTIONS = (
     "10) 证据（proof）：每次提交或更新采购、库存、出货、生产、安装结果，工具返回里都有 proof：按 proof.suggested 主动提醒用户上传对应的 PDF / 照片原件，"
     "并给出 proof.upload_url（手机直接传，30 分钟有效）。用户暂时没有就照常提交，在 proof_note 写明缺什么、何时补；不要因为缺证据而不提交，也不要编造证据。"
     "之后用 list_missing_proof 查还缺原件的单据，用 request_upload_link 生成新链接补传；原件先传到了别处（如临时任务）的，单据建好后用 attach_existing_proof 挂过去。原件上传后仍需人核验。"
+    "11) 采购小票：用户发来小票 / 收据照片说“录采购”时用 propose_purchase_receipt（不是 propose_stock_counts）。每行判断 usage：转卖 / 自用（腌制切配）/ 费用；"
+    "同一种香料一部分自用一部分转卖时用 self_qty 拆，拿不准就问用户。"
 )
 
 
@@ -663,6 +665,28 @@ def propose_item_aliases(ctx, db, rows, source_summary):
 
 
 # ---------- customer orders (大统华 PO 等) ----------
+@tool("propose_purchase_receipt", "录采购小票", "把一张采购小票 / 收据（超市、批发店、Restaurant Depot、Costco、本地供应商）录成待确认的采购：确认后生成一张已收货的采购记录，"
+      "有对应商品的行入库（默认 597），其他记为费用（不入库），小票原件挂在采购单上。一张小票调用一次。"
+      "meta：supplier（商家，必填，用小票抬头）、purchase_date（YYYY-MM-DD）、receipt_no（小票号 / 交易号）、tax、total（小票总额）、"
+      "payment_method（公司卡 / 现金 / 个人垫付 / 支票 / 转账 / 其他）、paid_by（个人垫付时必填：谁付的）、warehouse_code（默认 WH597）。"
+      "lines 每行：party_name（小票上的品名原文）、party_code（小票上的商品编码，有就填）、qty、unit（小票单位，如 bag / lb / ea / case）、unit_price、amount（这一行小计）、"
+      "sku_code（能确定对应我们哪个商品才填）、usage（resale 转卖 / production 自用：腌制切配用 / expense 费用不入库，如油费、文具、餐费、清洁剂）、"
+      "self_qty（同一行里自用的部分，按我们的基本单位；其余算转卖。香料等一部分自用一部分卖给大统华时用）、lot_code（有就填，没有系统按 商家-日期 自动编）。"
+      "折扣行写成负金额的 expense 行或并进对应行。看不清的不要猜：留空让用户在确认页选。不会直接生效。",
+      {"meta": {"type": "object"}, "lines": {"type": "array", "minItems": 1, "maxItems": 150, "items": {"type": "object"}},
+       "source_summary": {"type": "string", "description": "如 “11/12 Costco 小票照片”"}, "proof_note": {"type": "string", "description": "小票原件情况：已让用户上传，或还没有、何时补"}},
+      ["meta", "lines", "source_summary"], tier="propose")
+def propose_purchase_receipt(ctx, db, meta, lines, source_summary, proof_note=""):
+    meta = {**(meta or {}), "proof_note": proof_note}
+    b = bat_r.create_batch(db, ctx.user, bat_r.BatchIn(kind="purchase", rows=lines, meta=meta, source_note=source_summary), source=f"agent:{ctx.client}")
+    db.commit()
+    out = _batch_reply(ctx, b, db)
+    out["summary_legend"].update({"stock": "入库", "expense": "费用（不入库）"})
+    out["upload_url"] = out["proof"]["upload_url"]
+    out["message"] += " 请用 upload_url 上传小票照片（确认后挂到采购单）；没有也可以先确认，之后再补。"
+    return out
+
+
 @tool("propose_sku_merge", "合并重复商品", "同一个东西被建成了两个商品时（如国内采购名“三樱辣椒段”和卖给大统华的“剁椒”都建了商品），提出合并。"
       "rows 每行：from（要并掉的商品：品名 / 内部编号 / 大统华 Item#）、into（保留的商品）、reason（为什么是同一个东西，如“用户确认：国内采购名与大统华品名为同一商品”）。"
       "合并后库存转到保留商品，订单 / 采购 / 对照改指向，被并商品停用，旧名记成旧称。"

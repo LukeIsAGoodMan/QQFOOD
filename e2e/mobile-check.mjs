@@ -700,6 +700,33 @@ let exceptionTaskId
   await boss.context().close()
 }
 
+// ---------- 18. 采购小票：ChatGPT 读小票 → 手机确认（不认识的标费用、香料拆出自用）→ 采购记录 + 入库 ----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => (await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined })).json(), [path, body, method])
+  const sp = await call('/api/inv/skus', { name: '示例 五香粉', category: '干货', base_unit: '袋' })
+  const bt = await call('/api/batches', { kind: 'purchase', source_note: '11/12 Costco 小票',
+    meta: { supplier: 'Costco', purchase_date: '2026-11-12', receipt_no: 'E2E-1', tax: 0, total: 70, payment_method: '公司卡' },
+    rows: [{ party_name: 'FIVE SPICE PWD', party_code: '88001', qty: 10, unit: '袋', unit_price: 5, amount: 50, sku_code: sp.code },
+           { party_name: 'KS PAPER TOWEL', qty: 1, amount: 20 }] })
+  await page.goto(`${BASE}/ingest?batch=${bt.id}`); await page.waitForTimeout(1200)
+  ok('小票确认页显示商家、金额、付款', await page.locator('text=Costco').count() > 0 && await page.locator('text=$70.00').count() > 0)
+  await page.locator('label', { hasText: 'KS PAPER TOWEL' }).locator('button', { hasText: '不入库（费用）' }).tap(); await page.waitForTimeout(300)
+  await page.locator('label', { hasText: 'FIVE SPICE PWD' }).locator('input[type=number]').fill('4')
+  await checkLayout(page, '采购小票确认')
+  await shot(page, 'rcp-01-confirm')
+  await page.locator('button', { hasText: '确认所选（2）' }).tap(); await page.waitForTimeout(1500)
+  const m = await api(page, '/api/inv/master')
+  const twin = m.skus.find((x) => x.name === '示例 五香粉（自用）')
+  const rows = (await api(page, '/api/inv/stock')).rows
+  const qty = (id) => rows.filter((r) => r.sku_id === id).reduce((t, r) => t + r.on_hand, 0)
+  ok('确认后入库：转卖 6、自用 4（自动建自用商品）', twin && qty(sp.id) === 6 && qty(twin.id) === 4, `${qty(sp.id)} / ${twin && qty(twin.id)}`)
+  const pos = await api(page, '/api/purchasing/pos')
+  const po = (pos.rows || pos.items || pos).find((x) => x.supplier === 'Costco')
+  ok('生成已收货的采购记录', !!po && po.status === 'received')
+  await page.context().close()
+}
+
 await browser.close()
 const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} 通过；页面脚本错误 ${pageErrors.length} 个；截图在 e2e/screenshots/`)

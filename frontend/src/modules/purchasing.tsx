@@ -250,6 +250,7 @@ function InvoicePay({ po, reload }: { po: any; reload: () => void }) {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-semibold">票据与付款</span><Badge color={PAY_COLOR[po.payment_status]}>{po.payment_label}</Badge><Badge>{po.doc_label}</Badge>{po.missing_doc && <Badge color="yellow">缺{po.doc_label}照片</Badge>}</div>
+      {(po.purchase_date || po.payment_method) && <div className="text-xs text-slate-600">{po.purchase_date && `购买日期 ${po.purchase_date}`}{po.payment_method && ` · 付款：${po.payment_method_label}`}{po.paid_by && `（${po.paid_by} 垫付，待报销）`}</div>}
       <div className="grid grid-cols-3 gap-2 text-center text-xs">
         <div className="rounded bg-slate-50 p-2"><div className="text-slate-400">订单金额</div><div className="font-semibold">{money(po.total)}</div></div>
         <div className="rounded bg-slate-50 p-2"><div className="text-slate-400">应付参考（按已收）</div><div className="font-semibold">{money(po.payable)}</div></div>

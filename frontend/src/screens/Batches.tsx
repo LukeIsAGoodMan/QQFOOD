@@ -4,13 +4,14 @@ import { ApiError, get, post } from '../lib/api'
 import { dt, skuLabel } from '../lib/fmt'
 import { Badge, Empty, Field, Spinner, errMsg, useLoad, useToast } from '../components/ui'
 import { EvidencePanel } from '../components/Evidence'
+import { FOOD } from '../modules/categories'
 
 const ACTION: Record<string, [string, string]> = {
   new: ['新增', 'green'], update: ['修改', 'blue'], set: ['设定数量', 'blue'], unchanged: ['无变化', 'gray'],
-  duplicate: ['疑似重复', 'yellow'], error: ['有错误', 'red'], mapped: ['已配对', 'green'], unmapped: ['未配对 SKU', 'yellow'], merge: ['合并', 'purple'],
+  duplicate: ['疑似重复', 'yellow'], error: ['有错误', 'red'], mapped: ['已配对', 'green'], unmapped: ['未配对 SKU', 'yellow'], merge: ['合并', 'purple'], stock: ['入库', 'green'], expense: ['费用（不入库）', 'gray'],
 }
 const ST: Record<string, [string, string]> = { proposed: ['待确认', 'yellow'], applied: ['已全部应用', 'green'], partial: ['部分应用', 'green'], rejected: ['已驳回', 'gray'] }
-const selectable = (a: string) => ['new', 'update', 'set', 'duplicate', 'mapped', 'unmapped'].includes(a)
+const selectable = (a: string) => ['new', 'update', 'set', 'duplicate', 'mapped', 'unmapped', 'merge', 'stock', 'expense'].includes(a)
 const FIELD: Record<string, string> = { name: '名称', category: '分类', base_unit: '基本单位', conversions: '单位换算', barcode: '条码' }
 const fmtV = (v: any) => (v === null || v === undefined || v === '' ? '（空）' : typeof v === 'object' ? JSON.stringify(v) : String(v))
 
@@ -19,6 +20,7 @@ const PROOF: Record<string, string[]> = {
   stock_count: ['盘点表照片', '外库库存报表', '货架 / 冷库照片'],
   inbound: ['BOL', '调货单', '到货照片', '差异照片'],
   order: ['PO 原件', '客户沟通'],
+  purchase: ['小票', '送货单', '付款凭证'],
 }
 
 export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => void }) {
@@ -26,22 +28,24 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
   const { data: b, reload } = useLoad(() => get(`/api/batches/${id}`), [id])
   const [sel, setSel] = useState<Set<number>>(new Set())
   const [only, setOnly] = useState<'all' | 'issues'>('all')
-  const [ov, setOv] = useState<Record<number, { sku_id: string; factor?: string }>>({})
+  const [ov, setOv] = useState<Record<number, { sku_id?: string; factor?: string; expense?: boolean; self_qty?: string }>>({})
   const [reason, setReason] = useState('')
   const [askReason, setAskReason] = useState(false)
   const [fill, setFill] = useState<string | null>(null)
-  const pickable = ['order', 'inbound', 'stock_count'].includes(b?.kind)
+  const pickable = ['order', 'inbound', 'stock_count', 'purchase'].includes(b?.kind)
   const master = useLoad(() => (pickable ? get('/api/inv/master') : Promise.resolve(null)), [pickable])
   useEffect(() => { setFill(b?.fill_candidates?.[0]?.id ?? null) }, [b?.fill_candidates])
-  useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set', 'mapped', 'unmapped', 'merge'].includes(r.action) && !r.suspect).map((r: any) => r.index))) }, [b])
+  useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set', 'mapped', 'unmapped', 'merge', 'stock', 'expense'].includes(r.action) && !r.suspect).map((r: any) => r.index))) }, [b])
   if (!b) return <Spinner />
   const open = b.status === 'proposed'
   const toggle = (i: number) => { const n = new Set(sel); n.has(i) ? n.delete(i) : n.add(i); setSel(n) }
   const apply = async () => {
-    const overrides = Object.fromEntries(Object.entries(ov).filter(([, v]) => v.sku_id).map(([k, v]) => [k, { sku_id: v.sku_id, factor: v.factor ? Number(v.factor) : undefined }]))
+    const overrides = Object.fromEntries(Object.entries(ov).filter(([, v]) => v.sku_id || v.expense || (v.self_qty ?? '') !== '').map(([k, v]) => [k, {
+      sku_id: v.expense ? undefined : v.sku_id || undefined, factor: v.factor ? Number(v.factor) : undefined, expense: v.expense || undefined,
+      self_qty: (v.self_qty ?? '') !== '' ? Number(v.self_qty) : undefined }]))
     try {
       const r = await post(`/api/batches/${id}/apply`, { selected: [...sel], overrides, shortfall_reason: reason, fill_order_id: fill })
-      toast(r.result.fill_notes ? `已补到 ${r.result.order_code}` : r.result.order_code ? `已建订单 ${r.result.order_code}` : r.result.transfer_code ? `已建调入单 ${r.result.transfer_code}` : `已应用 ${r.result.applied.length} 行`); reload(); onChanged()
+      toast(r.result.po_code ? `已建采购记录 ${r.result.po_code}${r.result.needs_approval ? '（超额度，待老板事后审批）' : ''}` : r.result.fill_notes ? `已补到 ${r.result.order_code}` : r.result.order_code ? `已建订单 ${r.result.order_code}` : r.result.transfer_code ? `已建调入单 ${r.result.transfer_code}` : `已应用 ${r.result.applied.length} 行`); reload(); onChanged()
     } catch (e) {
       if (e instanceof ApiError && e.detail?.code === 'source_short') setAskReason(true)
       toast(errMsg(e), 'err')
@@ -69,6 +73,15 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
           <dt>PO 号</dt><dd className="font-mono font-semibold">{b.meta.po_no || <span className="font-sans font-normal text-amber-700">待补（先按送货单录）</span>}</dd>
           <dt>客户 / 送货点</dt><dd>{b.meta.customer || '大统华'} · {b.meta.site || '（未填）'}</dd>
           <dt>下单 / 交货</dt><dd>{b.meta.po_date || '—'} → <b>{b.meta.required_date || '未填'}</b>{b.meta.category && ` · ${b.meta.category}`}</dd>
+        </dl>
+      )}
+      {b.kind === 'purchase' && (
+        <dl className="kv rounded bg-slate-50 p-2">
+          <dt>商家</dt><dd className="font-semibold">{b.meta.supplier || '（未填）'}</dd>
+          <dt>日期 / 小票号</dt><dd>{b.meta.purchase_date || '—'}{b.meta.receipt_no && ` · ${b.meta.receipt_no}`}</dd>
+          <dt>金额</dt><dd><b>{b.meta.total != null ? `$${Number(b.meta.total).toFixed(2)}` : '—'}</b>{b.meta.tax ? `（含税 $${Number(b.meta.tax).toFixed(2)}）` : ''}</dd>
+          <dt>付款</dt><dd>{b.meta.payment_method || '—'}{b.meta.paid_by && ` · ${b.meta.paid_by} 垫付`}</dd>
+          <dt>入库到</dt><dd>{b.meta.warehouse_code || 'WH597'}</dd>
         </dl>
       )}
       {open && b.kind === 'order' && b.fill_candidates?.length > 0 && (
@@ -104,7 +117,10 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
                 </div>
               )}
               {r.messages.map((m: string, i: number) => <div key={i} className={`mt-1 text-xs ${r.action === 'error' ? 'text-red-600' : 'text-amber-700'}`}>{m}</div>)}
-              {open && pickable && ['unmapped', 'new', 'mapped', 'set'].includes(r.action) && master.data && (r.action === 'unmapped' || ov[r.index]) && (
+              {open && b.kind === 'purchase' && ['stock', 'unmapped', 'expense'].includes(r.action) && master.data && (
+                <PurchaseRowControls r={r} v={ov[r.index] || {}} skus={master.data.skus} onChange={(v) => setOv({ ...ov, [r.index]: v })} />
+              )}
+              {open && pickable && b.kind !== 'purchase' && ['unmapped', 'new', 'mapped', 'set'].includes(r.action) && master.data && (r.action === 'unmapped' || ov[r.index]) && (
                 <div className="mt-1 flex gap-1" onClick={(e) => e.preventDefault()}>
                   <select className="input min-w-0 flex-1" value={ov[r.index]?.sku_id || ''} onChange={(e) => setOv({ ...ov, [r.index]: { ...ov[r.index], sku_id: e.target.value } })}>
                     <option value="">{b.kind === 'order' ? '选我们的 SKU（可稍后在订单里配）' : '选我们的 SKU（确认后记住）'}</option>{master.data.skus.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select>
@@ -125,7 +141,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
       )}
       {PROOF[b.kind] && (
         <div className="rounded-lg border border-slate-200 p-3">
-          <p className="mb-2 text-xs text-slate-500">建议上传：{PROOF[b.kind].join('、')}（PDF / 照片）。没有也可以先确认，之后在这里补传，会自动挂到{b.kind === 'order' ? '订单' : b.kind === 'inbound' ? '调入单' : '这批记录'}上。</p>
+          <p className="mb-2 text-xs text-slate-500">建议上传：{PROOF[b.kind].join('、')}（PDF / 照片）。没有也可以先确认，之后在这里补传，会自动挂到{b.kind === 'order' ? '订单' : b.kind === 'inbound' ? '调入单' : b.kind === 'purchase' ? '采购单' : '这批记录'}上。</p>
           <EvidencePanel title="原件 / 照片（可后补）" targetType="batch" targetId={b.id} purposes={PROOF[b.kind]} compact />
         </div>
       )}
@@ -135,7 +151,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
           <button className="btn-ghost" onClick={reject}><X size={16} />全部驳回</button>
         </div>
       ) : (
-        <div className="rounded bg-slate-50 p-2 text-xs text-slate-600">{b.decided_by} · {dt(b.decided_at)} 处理{b.result?.applied && `：应用 ${b.result.applied.length} 行`}{b.result?.transfer_code && `，生成调入单 ${b.result.transfer_code}`}{b.result?.order_code && (b.result.fill_notes ? `，补到订单 ${b.result.order_code}` : `，生成订单 ${b.result.order_code}`)}{b.result?.fill_notes?.length > 0 && `（${b.result.fill_notes.join('；')}）`}{b.result?.note && ` · ${b.result.note}`}</div>
+        <div className="rounded bg-slate-50 p-2 text-xs text-slate-600">{b.decided_by} · {dt(b.decided_at)} 处理{b.result?.applied && `：应用 ${b.result.applied.length} 行`}{b.result?.transfer_code && `，生成调入单 ${b.result.transfer_code}`}{b.result?.po_code && `，生成采购记录 ${b.result.po_code}`}{b.result?.order_code && (b.result.fill_notes ? `，补到订单 ${b.result.order_code}` : `，生成订单 ${b.result.order_code}`)}{b.result?.fill_notes?.length > 0 && `（${b.result.fill_notes.join('；')}）`}{b.result?.note && ` · ${b.result.note}`}</div>
       )}
     </div>
   )
@@ -177,6 +193,37 @@ export function ResetDemo() {
       <Field label={`输入「${data.confirm_phrase}」确认`}><input className="input" value={phrase} onChange={(e) => setPhrase(e.target.value)} /></Field>
       <button className="btn-danger mt-2 w-full sm:w-auto" disabled={phrase !== data.confirm_phrase} onClick={go}>清空</button>
       {res && <div className="mt-2 rounded bg-emerald-50 p-2 text-xs text-emerald-800">已清空。备份：{res.backup}；删除文件 {res.files_removed} 个；停用账号 {res.deactivated_users.join('、') || '无'}</div>}
+    </div>
+  )
+}
+
+/** 采购小票的一行：选商品 / 标费用（不入库）/ 转卖商品里拆出自用的部分。 */
+function PurchaseRowControls({ r, v, skus, onChange }: { r: any; v: any; skus: any[]; onChange: (v: any) => void }) {
+  const skuId = v.sku_id || r.sku_id
+  const sku = skus.find((s: any) => s.id === skuId)
+  const expense = v.expense ?? r.action === 'expense'
+  const canSplit = !expense && sku && FOOD.has(sku.category) && (sku.usage || 'resale') === 'resale'
+  return (
+    <div className="mt-2 space-y-1.5" onClick={(e) => e.preventDefault()}>
+      <div className="flex flex-wrap gap-1.5">
+        <button type="button" aria-pressed={!expense} onClick={() => onChange({ ...v, expense: false })}
+          className={`min-h-9 rounded-full border px-3 text-xs ${!expense ? 'border-brand-600 bg-brand-600 text-white' : 'border-slate-200'}`}>入库</button>
+        <button type="button" aria-pressed={expense} onClick={() => onChange({ ...v, expense: true })}
+          className={`min-h-9 rounded-full border px-3 text-xs ${expense ? 'border-slate-600 bg-slate-600 text-white' : 'border-slate-200'}`}>不入库（费用）</button>
+      </div>
+      {!expense && (
+        <select className="input" value={skuId || ''} onChange={(e) => onChange({ ...v, sku_id: e.target.value, expense: false })}>
+          <option value="">选我们的商品（确认后记住这家店的叫法）</option>
+          {skus.map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}{s.usage === 'production' ? '（自用）' : ''}</option>)}
+        </select>
+      )}
+      {canSplit && (
+        <label className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
+          <span className="shrink-0">其中自用（腌制 / 切配）</span>
+          <input className="input w-20" type="number" inputMode="decimal" placeholder={String(r.self_qty || 0)} value={v.self_qty ?? ''} onChange={(e) => onChange({ ...v, self_qty: e.target.value })} />
+          <span className="shrink-0">{sku.base_unit}，其余转卖</span>
+        </label>
+      )}
     </div>
   )
 }
