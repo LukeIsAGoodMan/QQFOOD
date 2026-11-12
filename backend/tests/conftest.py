@@ -5,6 +5,7 @@ import uuid
 import pytest
 
 os.environ["QQ_DATA_DIR"] = tempfile.mkdtemp(prefix="qq597test_")
+os.environ["QQ_DISABLE_SCHEDULER"] = "1"  # 早上摘要在测试里手动触发
 os.environ["QQ_ORG_MODE"] = "standard"  # most tests check role separation; test_simple_mode covers the default
 
 from fastapi.testclient import TestClient  # noqa: E402

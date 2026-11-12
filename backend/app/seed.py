@@ -92,6 +92,30 @@ def upgrade_categories():
         db.close()
 
 
+def upgrade_brief():
+    """一次性：老板总览最上面加「今日摘要」。"""
+    db = SessionLocal()
+    try:
+        if not db.query(User).count() or db.get(AppSetting, "migration:brief_v1"):
+            return
+        actor = db.query(User).filter_by(role="sys_admin").first() or db.query(User).first()
+        for p in db.query(Page).filter_by(name="老板总览"):
+            v = db.get(PageVersion, p.published_version_id) if p.published_version_id else None
+            mods = list(v.layout["modules"]) if v else []
+            if any(x["type"] == "brief" for x in mods):
+                continue
+            layout = normalize_layout({"modules": [m("brief", "今日摘要")] + mods})
+            n = (max([x.version_no for x in db.query(PageVersion).filter_by(page_id=p.id)] or [0])) + 1
+            nv = PageVersion(page_id=p.id, version_no=n, layout=layout, note="系统升级：加入今日摘要（可移动、隐藏或回滚）", published_by=actor.id)
+            db.add(nv)
+            db.flush()
+            p.published_version_id, p.draft, p.draft_rev = nv.id, copy.deepcopy(layout), p.draft_rev + 1
+        db.add(AppSetting(key="migration:brief_v1", value={"done": True}))
+        db.commit()
+    finally:
+        db.close()
+
+
 def upgrade_orders():
     """一次性：已上线库加大统华客户、订单页换成订单模块（旧模块隐藏）、老板总览加订单指标、生产页加称重打标签。"""
     db = SessionLocal()

@@ -222,8 +222,54 @@ def _analyze_stock(db: Session, rows: list[dict]):
         seen.add((sku.id, w.code, lot_code))
         res["sku_id"], res["remember"] = sku.id, _should_remember(r, how)
         _stock_changes(db, res, sku, w, lot_code, qty_b, r.get("counted", True) is not False)
+        if res["action"] == "set":
+            _dup_with_inbound(db, res, sku, w, lot_code)
         out.append(res)
     return out
+
+
+def _in_transit_to(db, sku, w, lot_code):
+    """还没签收的调入（到 w、同商品；给了 Lot 就只看同 Lot）：[(调入单号, 在途数)]。"""
+    from ..models import Transfer, TransferLine
+    out = []
+    q = db.query(TransferLine, Transfer).join(Transfer, Transfer.id == TransferLine.transfer_id) \
+        .filter(Transfer.to_wh == w.id, Transfer.status.in_(["shipped", "partial"]), TransferLine.sku_id == sku.id)
+    for l, t in q:
+        if lot_code:
+            lot = db.get(Lot, l.lot_id) if l.lot_id else None
+            if not lot or lot.lot_code != lot_code:
+                continue
+        left = (l.qty_shipped or 0) - (l.qty_received or 0) - (l.qty_damaged or 0) - (l.qty_written_off or 0)
+        if left > 1e-9:
+            out.append((t.code, round(left, 3)))
+    return out
+
+
+def _pending_inbound(db, sku, w, lot_code):
+    """还没确认的调入批次里有没有同一批货。"""
+    hits = []
+    for b in db.query(BatchProposal).filter_by(kind="inbound", status="proposed"):
+        if (b.meta or {}).get("to_code", "WH597").upper() != w.code.upper():
+            continue
+        for a in analyze(db, b):
+            if a.get("sku_id") == sku.id and (not lot_code or str(a.get("key", "")).endswith(f"· {lot_code}")):
+                hits.append(b.code)
+                break
+    return hits
+
+
+def _dup_with_inbound(db, res, sku, w, lot_code):
+    """期初 / 盘点防重复：实盘时这批货可能已经点进去了，再签收调入就算两次。默认不勾，由人判断。"""
+    lot = f"Lot {lot_code} " if lot_code else ""
+    tr = _in_transit_to(db, sku, w, lot_code)
+    if tr:
+        res["messages"].append(f"可能重复：{lot}还在调入单 {'、'.join(f'{c}（在途 {q:g}）' for c, q in tr)} 里没签收。"
+                               f"如果这次实盘已经点到了这批货，确认后不要再签收那张调入单（在调入单上按“已计入实盘”核销）；实盘不含这批就照常确认")
+        res["suspect"] = bool(lot_code)
+    pend = _pending_inbound(db, sku, w, lot_code) if lot_code else []
+    if pend:
+        res["messages"].append(f"可能重复：待确认的调入批次 {'、'.join(pend)} 里也有{lot}。实盘和调入只录一边")
+        res["suspect"] = True
 
 
 def _stock_changes(db, res, sku, w, lot_code, qty, counted):
@@ -285,6 +331,12 @@ def _analyze_inbound(db: Session, meta: dict, rows: list[dict]):
         res.update({"action": "mapped" if how == "alias" else "new", "qty_base": qty_b, "unit": sku.base_unit, "sku_id": sku.id,
                     "remember": _should_remember(r, how),
                     "changes": {"SKU": [None, f"{sku.code} {sku.name}"], "在途": [None, qty_b]}})
+        if dst and lot_code:  # 防重复：目的仓已经有这个 Lot 的实物（多半是实盘时点进去了）
+            lt = db.query(Lot).filter_by(sku_id=sku.id, lot_code=lot_code).first()
+            have = balance(db, sku.id, dst.id, "on_hand", lt.id) if lt else 0.0
+            if have > 1e-9:
+                res["suspect"] = True
+                res["messages"].append(f"可能重复：{dst.code} 已有 Lot {lot_code} 实物 {have:g}（可能实盘时已点进去）。如果是同一批货，不要再录调入")
         if src and src.tracked:
             k = (sku.id, lot_code)
             need[k] = need.get(k, 0) + qty_b

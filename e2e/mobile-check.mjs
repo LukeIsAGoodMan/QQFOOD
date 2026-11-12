@@ -62,7 +62,7 @@ async function checkLayout(page, label) {
   const page = await login('boss')
   const h1 = await page.locator('h1').first().textContent()
   ok('老板登录后直接进入「老板总览」', h1?.includes('老板总览'), h1)
-  const cards = await page.locator('main section.card').evaluateAll((els) => els.slice(0, 2).map((e) => Math.round(e.getBoundingClientRect().top)))
+  const cards = await page.locator('main section.card').evaluateAll((els) => els.filter((e) => !e.querySelector('#brief')).slice(0, 2).map((e) => Math.round(e.getBoundingClientRect().top)))
   ok('指标卡在手机上两列并排', cards.length === 2 && cards[0] === cards[1], JSON.stringify(cards))
   await checkLayout(page, '老板总览')
   await shot(page, 'boss-01-dashboard')
@@ -674,6 +674,30 @@ let exceptionTaskId
   const al = await api(page, `/api/aliases?sku_id=${b.id}`)
   ok('旧名记成旧称', al.some((x) => x.name === '示例 三樱辣椒段'))
   await page.context().close()
+}
+
+// ---------- 17. 收尾：今日摘要（老板首页）；期初实盘与在途调入同一个 Lot → 标「可能重复」默认不勾 ----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => (await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined })).json(), [path, body, method])
+  const ib = await call('/api/batches', { kind: 'inbound', meta: { from_code: 'TOR' }, source_note: 'TOR 调货单', rows: [{ sku_code: 'RM-SPICE', qty: 4, lot_code: 'E2E-DUP' }] })
+  await call(`/api/batches/${ib.id}/apply`, { selected: [0] })
+  const sc = await call('/api/batches', { kind: 'stock_count', meta: {}, source_note: '597 实盘', rows: [
+    { sku_code: 'RM-SPICE', warehouse_code: 'WH597', lot_code: 'E2E-DUP', qty: 4 }, { sku_code: 'RM-SPICE', warehouse_code: 'WH597', lot_code: 'E2E-OK', qty: 1 }] })
+  await page.goto(`${BASE}/ingest?batch=${sc.id}`); await page.waitForTimeout(1200)
+  ok('实盘与在途调入同一个 Lot：标「可能重复」', await page.locator('text=可能重复（默认不勾）').count() === 1)
+  ok('可能重复的行默认不勾', await page.locator('button', { hasText: '确认所选（1）' }).count() === 1)
+  await checkLayout(page, '确认页（可能重复）')
+  await shot(page, 'wrp-01-dup')
+  await page.context().close()
+  const boss = await login('boss')
+  await boss.waitForTimeout(1500)
+  ok('老板首页有今日摘要', await boss.locator('#brief').count() === 1 && await boss.locator('#brief >> text=批待确认').count() > 0)
+  await boss.locator('#brief button', { hasText: 'ChatGPT 提交、等你确认' }).tap(); await boss.waitForTimeout(400)
+  ok('摘要可展开并点进去处理', await boss.locator('#brief a[href^="/ingest?batch="]').count() > 0)
+  await checkLayout(boss, '今日摘要')
+  await shot(boss, 'wrp-02-brief')
+  await boss.context().close()
 }
 
 await browser.close()

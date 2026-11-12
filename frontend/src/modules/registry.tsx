@@ -8,6 +8,7 @@ import { LotsModule, StockModule, TraceModule, TransfersModule } from './invento
 import { PurchasingModule, RequisitionsModule } from './purchasing'
 import { BoxesModule, OrdersModule } from './orders'
 import { ProductionPlanModule } from './production'
+import { BriefModule } from './brief'
 
 type Def = { label: string; group: string; description: string; Render: (p: ModProps) => ReactNode; defaults: () => any; width?: string }
 
@@ -29,6 +30,7 @@ export const MODULES: Record<string, Def> = {
   requisitions: { label: '需求与报价对比', group: '业务（专用）', description: '需求版本（余量）、报价对比、生成采购单', Render: RequisitionsModule, defaults: () => ({}) },
   orders: { label: '客户订单与发货', group: '业务（专用）', description: 'PO 录入、配对 SKU、拣货/扫箱发货、签收与拒收', Render: OrdersModule, defaults: () => ({}) },
   boxes: { label: '称重打标签', group: '业务（专用）', description: '每箱称重、打印标签（磅+箱）', Render: BoxesModule, defaults: () => ({}) },
+  brief: { label: '今日摘要', group: '展示', description: '今明要交的单、待确认批次、低库存、临期、缺原件、逾期', Render: BriefModule, defaults: () => ({}) },
   trace: { label: '追溯查询', group: '业务（专用）', description: '正向/反向追溯，导出 CSV', Render: TraceModule, defaults: () => ({}) },
 }
 

@@ -10,6 +10,7 @@ import { ScanButton } from '../components/Scan'
 import { IngestModule, TaskCard } from '../modules/basic'
 import { Preview } from '../components/Evidence'
 import { PageByName } from './PageView'
+import { BriefCard } from '../modules/brief'
 
 export function Home() {
   const { me } = useAuth()
@@ -18,7 +19,7 @@ export function Home() {
 }
 
 function ShiftHome() {
-  const { me } = useAuth()
+  const { me, can } = useAuth()
   const toast = useToast()
   const { data } = useLoad(() => get('/api/my-shift'), [])
   const [scan, setScan] = useState<any>(null)
@@ -33,6 +34,7 @@ function ShiftHome() {
   return (
     <div className="mx-auto max-w-3xl space-y-4">
       <h1 className="text-xl font-bold">{t('nav.home')} · {me?.name}</h1>
+      {(can('order.manage') || can('inventory.master')) && <BriefCard />}
       <div className="card p-4">
         <div className="mb-3 flex items-center gap-2 font-semibold"><ClipboardCheck size={18} />今日检查</div>
         {data.checklists.length === 0 && <div className="text-sm text-slate-400">没有分配给你的每日检查</div>}

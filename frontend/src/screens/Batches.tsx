@@ -33,7 +33,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
   const pickable = ['order', 'inbound', 'stock_count'].includes(b?.kind)
   const master = useLoad(() => (pickable ? get('/api/inv/master') : Promise.resolve(null)), [pickable])
   useEffect(() => { setFill(b?.fill_candidates?.[0]?.id ?? null) }, [b?.fill_candidates])
-  useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set', 'mapped', 'unmapped', 'merge'].includes(r.action)).map((r: any) => r.index))) }, [b])
+  useEffect(() => { if (b?.rows) setSel(new Set(b.rows.filter((r: any) => ['new', 'update', 'set', 'mapped', 'unmapped', 'merge'].includes(r.action) && !r.suspect).map((r: any) => r.index))) }, [b])
   if (!b) return <Spinner />
   const open = b.status === 'proposed'
   const toggle = (i: number) => { const n = new Set(sel); n.has(i) ? n.delete(i) : n.add(i); setSel(n) }
@@ -97,7 +97,7 @@ export function BatchDetail({ id, onChanged }: { id: string; onChanged: () => vo
             {open && <input type="checkbox" className="mt-1 shrink-0" disabled={!selectable(r.action)} checked={sel.has(r.index)} onChange={() => toggle(r.index)} />}
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-slate-400">#{r.index + 1}</span><span className="font-medium">{r.key || '—'}</span>
-                <Badge color={ACTION[r.action][1]}>{ACTION[r.action][0]}</Badge>{b.kind === 'sku_upsert' && r.code && <span className="text-xs text-slate-500">{r.code}</span>}</div>
+                <Badge color={ACTION[r.action][1]}>{ACTION[r.action][0]}</Badge>{r.suspect && <Badge color="red">可能重复（默认不勾）</Badge>}{b.kind === 'sku_upsert' && r.code && <span className="text-xs text-slate-500">{r.code}</span>}</div>
               {Object.keys(r.changes || {}).length > 0 && (
                 <div className="mt-1 space-y-0.5 text-xs">
                   {Object.entries(r.changes).map(([k, v]: any) => <div key={k}><span className="text-slate-400">{FIELD[k] || k}：</span>{v[0] !== null && <span className="text-slate-400 line-through">{fmtV(v[0])}</span>} → <b>{fmtV(v[1])}</b>{r.unit && ['实物', '未核数', '未核数（估计）', '在途'].includes(k) && ` ${r.unit}`}</div>)}
