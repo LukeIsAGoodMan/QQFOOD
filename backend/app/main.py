@@ -61,6 +61,8 @@ async def lifespan(_app):
     upgrade_orders()
     from .seed import upgrade_aliases
     upgrade_aliases()
+    from .seed import upgrade_categories
+    upgrade_categories()
     _load_org_mode()
     yield
 

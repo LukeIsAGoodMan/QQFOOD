@@ -81,8 +81,7 @@ def test_PUR03_receive_by_line_needs_signoff_and_is_idempotent(client, login):
     assert client.post(f"/api/purchasing/pos/{pid}/receipts", json={"lines": [{"po_line_id": inv_line, "qty": 1, "lot_code": "X"}]}, headers=staff).status_code == 409
     client.post(f"/api/purchasing/pos/{pid}/order", headers=buyer)
     before = on_hand(client, wh, "PK-TRAY")
-    # lot required for inventory lines; reject reason required
-    assert client.post(f"/api/purchasing/pos/{pid}/receipts", json={"lines": [{"po_line_id": inv_line, "qty": 6}]}, headers=staff).status_code == 400
+    # reject reason required（食品类必须填 Lot 见 test_categories；托盘是生产用品，Lot 可不填）
     assert client.post(f"/api/purchasing/pos/{pid}/receipts", json={"lines": [{"po_line_id": inv_line, "qty": 6, "lot_code": "P1", "rejected": 1}]}, headers=staff).status_code == 400
     # over-receipt blocked without reason
     assert client.post(f"/api/purchasing/pos/{pid}/receipts", json={"lines": [{"po_line_id": inv_line, "qty": 11, "lot_code": "P1"}]}, headers=staff).status_code == 409

@@ -516,7 +516,7 @@ def _batch_reply(ctx, b, db):
 
 
 @tool("propose_skus", "批量提交 SKU", "批量新增或修改商品主档，以品名为主。rows 每行：name（我们的品名，必填）、tnt_item_no（大统华 Item#，有就填，没有留空，以后看到 PO 再补）、"
-      "tnt_name（大统华品名，可空）、code（内部编码，可空=自动编号；按品名找已有商品，同名即修改）、category（原料/包材/成品/耗材）、base_unit（基本单位，如 箱）、"
+      "tnt_name（大统华品名，可空）、code（内部编码，可空=自动编号；按品名找已有商品，同名即修改）、category（库存分类，必须是 干货/冻货/原料肉/原料菜/生产用品/公司用品/生产机器 之一；拿不准就不填=未分类，老板在库存页点选；只改分类也可以：给 name + category）、base_unit（基本单位，如 箱）、"
       "conversions（{单位: 每个基本单位等于多少}，如 {\"磅\": 20}）、barcode、safety_stock（{仓库编码: 数量}）、"
       "purchase_pack（供应商每箱多少基本单位，如鸡腿肉 40）、ship_pack（出货每箱目标量，如鸡丁 50）。称重品（肉、切粒）基本单位用“磅”。不会直接生效。",
       {"rows": {"type": "array", "minItems": 1, "maxItems": 300, "items": {"type": "object"}},

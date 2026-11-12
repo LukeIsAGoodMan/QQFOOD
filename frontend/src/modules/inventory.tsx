@@ -10,6 +10,7 @@ import { EvidencePanel } from '../components/Evidence'
 import { LotLabel, ScanButton } from '../components/Scan'
 import { Timeline, type ModProps } from './basic'
 import { AliasManager } from './aliases'
+import { CatBadge, CategoryChips, ClassifyDialog, FOOD, UNCAT } from './categories'
 
 const useMaster = () => useLoad(() => get('/api/inv/master'), [])
 
@@ -90,7 +91,7 @@ function CountDialog({ master, row, lot, onClose, onDone }: any) {
   }
   void master
   return (
-    <Modal open onClose={onClose} title={`盘点/核数：${row.sku_code} @ ${row.warehouse}${lot ? ` · ${lot.lot_code}` : ''}`} footer={<button className="btn-primary" disabled={qty === '' || !reason} onClick={save}>{t('common.submit')}</button>}>
+    <Modal open onClose={onClose} title={`盘点/核数：${row.sku_name} @ ${row.warehouse}${lot ? ` · ${lot.lot_code}` : ''}`} footer={<button className="btn-primary" disabled={qty === '' || !reason} onClick={save}>{t('common.submit')}</button>}>
       <p className="mb-3 text-sm text-slate-600">账面实物 {num(lot ? lot.on_hand : row.on_hand)}，未核数 {num(lot ? lot.unverified : row.unverified)}。提交后未核数清零，实盘量成为实物库存，差异形成调整流水。</p>
       <Field label="实盘数量"><input className="input text-lg" type="number" inputMode="decimal" value={qty} onChange={(e) => setQty(e.target.value)} /></Field>
       <div className="mt-3"><Field label="原因 / 盘点说明 *"><input className="input" value={reason} onChange={(e) => setReason(e.target.value)} /></Field></div>
@@ -109,7 +110,7 @@ function IssueDialog({ row, lot, onClose, onDone }: any) {
     } catch (e) { toast(errMsg(e), 'err') }
   }
   return (
-    <Modal open onClose={onClose} title={`出库：${row.sku_code}${lot ? ` · ${lot.lot_code}` : ''}`} footer={<button className="btn-primary" disabled={!f.qty} onClick={save}>{t('common.submit')}</button>}>
+    <Modal open onClose={onClose} title={`出库：${row.sku_name}${lot ? ` · ${lot.lot_code}` : ''}`} footer={<button className="btn-primary" disabled={!f.qty} onClick={save}>{t('common.submit')}</button>}>
       <div className="space-y-3">
         <Field label={t('inv.qty')}><input className="input text-lg" type="number" value={f.qty} onChange={(e) => setF({ ...f, qty: e.target.value })} /></Field>
         <Field label="订单号"><input className="input" value={f.order_ref} onChange={(e) => setF({ ...f, order_ref: e.target.value })} /></Field>
@@ -128,10 +129,18 @@ export function StockModule(_: ModProps) {
   const stock = useLoad(() => get(`/api/inv/stock${wh ? `?warehouse_id=${wh}` : ''}`), [wh])
   const [open, setOpen] = useState<Record<string, boolean>>({})
   const [dlg, setDlg] = useState<any>(null)
+  const [cat, setCat] = useState(() => { try { return localStorage.getItem('stock.cat') || '' } catch { return '' } })
   if (stock.error) return <ErrorBox error={stock.error} />
   if (!stock.data || !master.data) return <Spinner />
   const reload = () => { stock.reload(); master.reload() }
   const skuOf = (id: string) => master.data.skus.find((s: any) => s.id === id)
+  const catOf = (r: any) => r.sku_category || UNCAT
+  const counts: Record<string, number> = {}
+  for (const id of new Set(stock.data.rows.map((r: any) => r.sku_id))) { const c = skuOf(id as string)?.category || UNCAT; counts[c] = (counts[c] || 0) + 1 }
+  const pickCat = (c: string) => { setCat(c); try { localStorage.setItem('stock.cat', c) } catch { /* 私密模式 */ } }
+  const curCat = cat && counts[cat] ? cat : ''
+  const rows = stock.data.rows.filter((r: any) => !curCat || catOf(r) === curCat)
+  const todo = master.data.skus.filter((s: any) => !s.category || s.category === UNCAT).length
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -141,11 +150,18 @@ export function StockModule(_: ModProps) {
         {can('inventory.post') && <button className="btn-primary" onClick={() => setDlg({ type: 'receive' })}><PackageCheck size={16} />{t('inv.receive')}</button>}
         {can('inventory.master') && <button className="btn-secondary" onClick={() => setDlg({ type: 'warehouses' })}><Warehouse size={16} />仓库与来源地</button>}
         <button className="btn-secondary" onClick={() => setDlg({ type: 'aliases' })}><Tags size={16} />商品对照</button>
+        {can('inventory.master') && <button className="btn-secondary" onClick={() => setDlg({ type: 'classify' })}>整理分类</button>}
         <span className="w-full text-xs text-slate-400 sm:ml-auto sm:w-auto">计算于 {ago(stock.data.computed_at)} · 可用 = 实物 − 隔离/待放行 − 预留；未核数不计入</span>
       </div>
+      {todo > 0 && can('inventory.master') && (
+        <button className="mb-3 flex min-h-11 w-full items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 text-left text-sm text-amber-800" onClick={() => setDlg({ type: 'classify' })}>
+          <span className="flex-1">有 <b>{todo}</b> 个商品还没分类</span><span className="font-medium">去分类 →</span>
+        </button>
+      )}
+      <CategoryChips counts={counts} value={curCat} onChange={pickCat} />
       {/* phones: one card per SKU × warehouse, available qty first */}
       <div className="space-y-2 sm:hidden">
-        {stock.data.rows.map((r: any) => {
+        {rows.map((r: any) => {
           const k = `${r.sku_id}|${r.warehouse_id}`
           const chip = (label: string, v: any, cls = '') => <span className={`rounded bg-slate-50 px-2 py-1 ${cls}`}>{label} <b>{num(v)}</b></span>
           return (
@@ -153,7 +169,7 @@ export function StockModule(_: ModProps) {
               <div className="flex items-start gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{r.sku_name}</div>
-                  <div className="text-xs text-slate-500">{r.sku_code} · {r.warehouse}{r.warehouse_kind === 'external' && ' · 外库'}</div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500"><CatBadge c={catOf(r)} /><span>{r.warehouse}{r.warehouse_kind === 'external' && ' · 外库'}</span></div>
                 </div>
                 <div className="text-right">
                   <div className={`text-2xl font-bold leading-none ${r.below_safety ? 'text-red-600' : ''}`}>{num(r.available)}</div>
@@ -197,13 +213,13 @@ export function StockModule(_: ModProps) {
             <th className="th text-right">预留</th><th className="th text-right">可用</th><th className="th text-right">安全库存</th><th className="th text-right">在途</th><th className="th text-right">未核数</th><th className="th"></th>
           </tr></thead>
           <tbody className="divide-y">
-            {stock.data.rows.map((r: any) => {
+            {rows.map((r: any) => {
               const k = `${r.sku_id}|${r.warehouse_id}`
               return (
                 <Fragment key={k}>
                   <tr className={r.below_safety ? 'bg-red-50/50' : ''}>
                     <td className="td"><button className="text-slate-400" onClick={() => setOpen({ ...open, [k]: !open[k] })}>{open[k] ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</button></td>
-                    <td className="td"><div className="font-medium">{r.sku_code}</div><div className="text-xs text-slate-500">{r.sku_name}</div></td>
+                    <td className="td"><div className="font-medium">{r.sku_name}</div><div className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-500"><CatBadge c={catOf(r)} />{r.sku_code}</div></td>
                     <td className="td whitespace-nowrap">{r.warehouse}{r.warehouse_kind === 'external' && <Badge color="purple">外库</Badge>}</td>
                     <td className="td text-right">{num(r.on_hand)}</td>
                     <td className="td text-right text-red-600">{r.blocked ? num(r.blocked) : '—'}</td>
@@ -236,7 +252,8 @@ export function StockModule(_: ModProps) {
           </tbody>
         </table>
       </div>
-      {!stock.data.rows.length && <Empty />}
+      {!rows.length && <Empty />}
+      {dlg?.type === 'classify' && <ClassifyDialog skus={master.data.skus} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'receive' && <ReceiveDialog master={master.data} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'count' && <CountDialog master={master.data} row={dlg.row} lot={dlg.lot} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'issue' && <IssueDialog row={dlg.row} lot={dlg.lot} onClose={() => setDlg(null)} onDone={reload} />}
@@ -523,8 +540,8 @@ function NewBatch({ master, onClose, onDone }: any) {
   const toast = useToast()
   const [key] = useState(uuid())
   const [f, setF] = useState<any>({ product_sku_id: '', warehouse_id: master.warehouses.find((w: any) => w.kind === 'main')?.id, output_lot_code: '', output_qty: '', sop_ref: '', inputs: [{ lot_id: '', qty: '' }] })
-  const products = master.skus.filter((s: any) => s.category === '成品')
-  const rawLots = master.lots.filter((l: any) => master.skus.find((s: any) => s.id === l.sku_id)?.category !== '成品')
+  const products = master.skus.filter((s: any) => FOOD.has(s.category) || s.category === UNCAT)
+  const rawLots = master.lots.filter((l: any) => l.sku_id !== f.product_sku_id)
   const skuName = (id: string) => master.skus.find((s: any) => s.id === id)?.name
   const save = async () => {
     try {

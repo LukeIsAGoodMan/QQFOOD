@@ -73,6 +73,25 @@ def upgrade_aliases():
         db.close()
 
 
+def upgrade_categories():
+    """一次性：库存分类换成 干货/冻货/原料肉/原料菜/生产用品/公司用品/生产机器。旧分类按品名猜，猜不出来 → 未分类（库存页一点补上）。"""
+    from .categories import ALL, guess
+    db = SessionLocal()
+    try:
+        if not db.query(User).count() or db.get(AppSetting, "migration:categories_v1"):
+            return
+        moved = {}
+        for s in db.query(Sku):
+            if s.category not in ALL:
+                new = guess(s.name, s.category)
+                moved[s.code] = [s.category, new]
+                s.category = new
+        db.add(AppSetting(key="migration:categories_v1", value={"done": True, "moved": moved}))
+        db.commit()
+    finally:
+        db.close()
+
+
 def upgrade_orders():
     """一次性：已上线库加大统华客户、订单页换成订单模块（旧模块隐藏）、老板总览加订单指标、生产页加称重打标签。"""
     db = SessionLocal()
@@ -195,14 +214,14 @@ def seed_if_empty():
         ext = Warehouse(code="EXT1", name="外库 1（示例）", kind="external")
         db.add_all([wh597, ext] + canada_sources())
         skus = {
-            "RM-BEEF": Sku(code="RM-BEEF", name="示例 冷冻牛肉卷", category="原料", base_unit="箱", conversions={"磅": 20}),
-            "RM-SPICE": Sku(code="RM-SPICE", name="示例 香料包", category="原料", base_unit="箱", conversions={"包": 50}),
-            "PK-TRAY": Sku(code="PK-TRAY", name="示例 包装托盘", category="包材", base_unit="箱"),
-            "FG-SOUP": Sku(code="FG-SOUP", name="示例 成品汤料", category="成品", base_unit="箱"),
-            "FG-CHK-DICE": Sku(code="FG-CHK-DICE", name="示例 切粒鸡丁", category="成品", base_unit="磅", catch_weight=True, ship_pack=50),
-            "FG-PORK-DICE": Sku(code="FG-PORK-DICE", name="示例 切粒咕咾肉", category="成品", base_unit="磅", catch_weight=True, ship_pack=50),
-            "RM-CHK-LEG": Sku(code="RM-CHK-LEG", name="示例 鸡腿肉（原料）", category="原料", base_unit="磅", catch_weight=True, purchase_pack=40),
-            "RM-PORK-BUTT": Sku(code="RM-PORK-BUTT", name="示例 梅头肉（原料）", category="原料", base_unit="磅", catch_weight=True, purchase_pack=65),
+            "RM-BEEF": Sku(code="RM-BEEF", name="示例 冷冻牛肉卷", category="原料肉", base_unit="箱", conversions={"磅": 20}),
+            "RM-SPICE": Sku(code="RM-SPICE", name="示例 香料包", category="干货", base_unit="箱", conversions={"包": 50}),
+            "PK-TRAY": Sku(code="PK-TRAY", name="示例 包装托盘", category="生产用品", base_unit="箱"),
+            "FG-SOUP": Sku(code="FG-SOUP", name="示例 成品汤料", category="干货", base_unit="箱"),
+            "FG-CHK-DICE": Sku(code="FG-CHK-DICE", name="示例 切粒鸡丁", category="冻货", base_unit="磅", catch_weight=True, ship_pack=50),
+            "FG-PORK-DICE": Sku(code="FG-PORK-DICE", name="示例 切粒咕咾肉", category="冻货", base_unit="磅", catch_weight=True, ship_pack=50),
+            "RM-CHK-LEG": Sku(code="RM-CHK-LEG", name="示例 鸡腿肉（原料）", category="原料肉", base_unit="磅", catch_weight=True, purchase_pack=40),
+            "RM-PORK-BUTT": Sku(code="RM-PORK-BUTT", name="示例 梅头肉（原料）", category="原料肉", base_unit="磅", catch_weight=True, purchase_pack=65),
         }
         db.add_all(skus.values())
         db.flush()

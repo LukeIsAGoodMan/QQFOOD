@@ -17,6 +17,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..categories import SKU_CATEGORIES, normalize as norm_category
 from ..core import audit, current_user, get_or_404, notify, require
 from ..db import get_db
 from ..models import (InventoryPosting, InventoryTxn, Lot, ProductionBatch, QualityEvent, Reservation, SafetyStock,
@@ -115,7 +116,7 @@ def master(u: User = Depends(current_user), db: Session = Depends(get_db)):
 class SkuIn(BaseModel):
     code: str = ""  # 可空：以品名为主，系统自动编号
     name: str
-    category: str = "原料"
+    category: str = "未分类"
     base_unit: str = "箱"
     conversions: dict = {}
     barcode: str | None = None
@@ -127,6 +128,10 @@ def create_sku(body: SkuIn, u: User = Depends(current_user), db: Session = Depen
     from .batches import _norm, next_sku_code
     if any(_norm(x.name) == _norm(body.name) for x in db.query(Sku)):
         raise HTTPException(409, f"已有同名商品「{body.name}」")
+    cat = norm_category(body.category, body.name)
+    if cat is None:
+        raise HTTPException(400, f"分类需为 {'/'.join(SKU_CATEGORIES)}")
+    body.category = cat
     body.code = body.code.strip().upper() or next_sku_code(db)
     if db.query(Sku).filter_by(code=body.code).first():
         raise HTTPException(409, "SKU 编码已存在")
@@ -135,6 +140,35 @@ def create_sku(body: SkuIn, u: User = Depends(current_user), db: Session = Depen
     audit(db, u, "sku.created", "sku", s.id, code=body.code)
     db.commit()
     return {"id": s.id}
+
+
+class SkuPatch(BaseModel):
+    category: str | None = None
+    name: str | None = None
+
+
+@router.patch("/skus/{sid}")
+def patch_sku(sid: str, body: SkuPatch, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """改分类 / 品名（库存页“补分类”、商品页）。改名不影响库存和历史单据。"""
+    require(u, "inventory.master")
+    from .batches import _norm
+    s = get_or_404(db, Sku, sid, "商品不存在")
+    before = {"category": s.category, "name": s.name}
+    if body.category is not None:
+        cat = norm_category(body.category, s.name)
+        if cat is None:
+            raise HTTPException(400, f"分类需为 {'/'.join(SKU_CATEGORIES)}")
+        s.category = cat
+    if body.name is not None and body.name.strip() != s.name:
+        n = body.name.strip()
+        if not n:
+            raise HTTPException(400, "品名不能为空")
+        if any(_norm(x.name) == _norm(n) for x in db.query(Sku).filter(Sku.id != s.id)):
+            raise HTTPException(409, f"已有同名商品「{n}」")
+        s.name = n
+    audit(db, u, "sku.updated", "sku", s.id, before=before, after={"category": s.category, "name": s.name})
+    db.commit()
+    return {"id": s.id, "category": s.category, "name": s.name}
 
 
 class SafetyIn(BaseModel):
@@ -273,7 +307,7 @@ def stock(warehouse_id: str | None = None, u: User = Depends(current_user), db: 
         available = a["on_hand"] - a["blocked"] - a["reserved"]
         ss = safety.get((sku_id, wh_id))
         out.append({
-            "sku_id": sku_id, "sku_code": sku.code, "sku_name": sku.name, "unit": sku.base_unit,
+            "sku_id": sku_id, "sku_code": sku.code, "sku_name": sku.name, "sku_category": sku.category, "unit": sku.base_unit,
             "conversions": sku.conversions, "warehouse_id": wh_id, "warehouse": wh.name, "warehouse_kind": wh.kind,
             "on_hand": round(a["on_hand"], 3), "blocked": round(a["blocked"], 3), "reserved": round(a["reserved"], 3),
             "available": round(available, 3), "in_transit": round(a["in_transit"], 3),
@@ -288,11 +322,11 @@ def stock(warehouse_id: str | None = None, u: User = Depends(current_user), db: 
     for (sku_id, wh_id), ss in safety.items():
         if (sku_id, wh_id) not in agg and (not warehouse_id or wh_id == warehouse_id):
             sku, wh = skus[sku_id], whs[wh_id]
-            out.append({"sku_id": sku_id, "sku_code": sku.code, "sku_name": sku.name, "unit": sku.base_unit,
+            out.append({"sku_id": sku_id, "sku_code": sku.code, "sku_name": sku.name, "sku_category": sku.category, "unit": sku.base_unit,
                         "conversions": sku.conversions, "warehouse_id": wh_id, "warehouse": wh.name,
                         "warehouse_kind": wh.kind, "on_hand": 0, "blocked": 0, "reserved": 0, "available": 0,
                         "in_transit": 0, "unverified": 0, "safety_stock": ss, "below_safety": ss > 0, "lots": []})
-    out.sort(key=lambda r: (not r["below_safety"], r["sku_code"], r["warehouse"]))
+    out.sort(key=lambda r: (not r["below_safety"], r["sku_name"], r["warehouse"]))
     return {"rows": out, "computed_at": datetime.now(timezone.utc)}
 
 

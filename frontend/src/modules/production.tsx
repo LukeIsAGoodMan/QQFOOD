@@ -7,6 +7,7 @@ import { dt, num, skuLabel } from '../lib/fmt'
 import { Badge, Empty, Field, LOT_COLOR, LOT_LABEL, Modal, Segmented, Spinner, errMsg, useLoad, useToast } from '../components/ui'
 import { BoxLabels } from './orders'
 import type { ModProps } from './basic'
+import { FOOD, UNCAT } from './categories'
 
 const u = (x?: string) => (x === '磅' ? 'lb' : x || '')
 
@@ -57,7 +58,7 @@ function RunDialog({ init, setup, onClose, onDone }: { init: { sku_id?: string; 
     <Modal open onClose={onClose} wide title="生产完工（切配 / 分包 / 腌制）" footer={<button className="btn-primary" disabled={!skuId || !produced || !consumed} onClick={submit}><Factory size={16} />完工并{catchW ? '打印标签' : '入库'}</button>}>
       <div className="space-y-4">
         <div className="grid gap-2 sm:grid-cols-3">
-          <Field label="做的是什么（成品）"><select className="input" value={skuId} onChange={(e) => setSkuId(e.target.value)}><option value="">选择…</option>{setup.skus.filter((s: any) => s.category === '成品' || setup.recipes.some((r: any) => r.output_sku_id === s.id)).map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select></Field>
+          <Field label="做的是什么（成品）"><select className="input" value={skuId} onChange={(e) => setSkuId(e.target.value)}><option value="">选择…</option>{setup.skus.filter((s: any) => FOOD.has(s.category) || s.category === UNCAT || setup.recipes.some((r: any) => r.output_sku_id === s.id)).map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select></Field>
           <Field label="成品批次号"><input className="input" value={lotCode} onChange={(e) => setLotCode(e.target.value)} /></Field>
           <Field label="用什么原料"><select className="input" value={inputSku} onChange={(e) => setInputSku(e.target.value)}><option value="">选择…</option>{setup.skus.filter((s: any) => s.id !== skuId).map((s: any) => <option key={s.id} value={s.id}>{skuLabel(s)}</option>)}</select></Field>
         </div>
@@ -177,7 +178,7 @@ function Setup({ setup, reload }: { setup: any; reload: () => void }) {
       setEdit(null); reload()
     } catch (e) { toast(errMsg(e), 'err') }
   }
-  const rows = setup.skus.filter((s: any) => s.catch_weight || s.purchase_pack || s.ship_pack || recipeOf(s.id) || s.category === '成品' || s.category === '原料')
+  const rows = setup.skus.filter((s: any) => s.catch_weight || s.purchase_pack || s.ship_pack || recipeOf(s.id) || s.category === '原料肉' || s.category === '原料菜')
   return (
     <div className="space-y-2">
       <p className="text-xs text-slate-500">换供应商、换箱子时直接在这里改；以前的采购单和生产记录保留当时的数字。</p>
