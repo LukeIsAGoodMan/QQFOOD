@@ -109,7 +109,7 @@ def sku_out(s: Sku, tnt: dict) -> dict:
     return {"id": s.id, "code": s.code, "name": s.name, "category": s.category, "base_unit": s.base_unit,
             "conversions": s.conversions, "barcode": s.barcode, "tnt_item_no": tnt.get(s.id, ""),
             "purchase_pack": s.purchase_pack, "ship_pack": s.ship_pack, "catch_weight": bool(s.catch_weight),
-            "active": s.active is not False, "merged_into": s.merged_into}
+            "active": s.active is not False, "merged_into": s.merged_into, "usage": s.usage or "", "twin_id": s.twin_id}
 
 
 @router.get("/master")
@@ -138,6 +138,7 @@ class SkuIn(BaseModel):
     tnt_item_no: str = ""
     purchase_pack: float | None = None
     ship_pack: float | None = None
+    usage: str | None = None  # resale 转卖 / production 自用；不给按分类默认
 
 
 def _check_name(db: Session, name: str, except_id: str | None = None) -> str:
@@ -182,7 +183,11 @@ def create_sku(body: SkuIn, u: User = Depends(current_user), db: Session = Depen
     for k in ("purchase_pack", "ship_pack"):
         if (getattr(body, k) or 0) < 0:
             raise HTTPException(400, "箱规不能为负")
-    s = Sku(**body.model_dump(exclude={"tnt_item_no"}), catch_weight=body.base_unit in ("磅", "lb"))
+    from .. import usage as us
+    use = us.normalize(body.usage) if body.usage is not None else us.default_usage(body.category)
+    if use is None:
+        raise HTTPException(400, "用途需为 转卖 / 自用")
+    s = Sku(**body.model_dump(exclude={"tnt_item_no", "usage"}), usage=use, catch_weight=body.base_unit in ("磅", "lb"))
     db.add(s)
     db.flush()
     if tnt_no:
@@ -202,6 +207,7 @@ class SkuPatch(BaseModel):
     purchase_pack: float | None = None
     ship_pack: float | None = None
     active: bool | None = None
+    usage: str | None = None
     reason: str = ""   # 停用还有库存的商品时需要
 
 
@@ -212,7 +218,7 @@ def patch_sku(sid: str, body: SkuPatch, u: User = Depends(current_user), db: Ses
     from .. import sku_merge
     from .orders import set_tnt_item_no
     s = get_or_404(db, Sku, sid, "商品不存在")
-    keys = ("name", "category", "code", "base_unit", "barcode", "purchase_pack", "ship_pack", "active")
+    keys = ("name", "category", "code", "base_unit", "barcode", "purchase_pack", "ship_pack", "active", "usage")
     before = {k: getattr(s, k) for k in keys}
     if s.merged_into and body.active:
         raise HTTPException(409, "这个商品已经并入别的商品，不能重新启用")
@@ -238,6 +244,12 @@ def patch_sku(sid: str, body: SkuPatch, u: User = Depends(current_user), db: Ses
         s.catch_weight = True
     if body.barcode is not None:
         s.barcode = body.barcode.strip() or None
+    if body.usage is not None:
+        from .. import usage as us
+        use = us.normalize(body.usage)
+        if use is None:
+            raise HTTPException(400, "用途需为 转卖 / 自用")
+        s.usage = use
     for k in ("purchase_pack", "ship_pack"):
         v = getattr(body, k)
         if v is not None:
@@ -274,6 +286,24 @@ def sku_usage(sid: str, u: User = Depends(current_user), db: Session = Depends(g
     from .. import sku_merge
     s = get_or_404(db, Sku, sid, "商品不存在")
     return sku_merge.usage(db, s)
+
+
+class ConvertIn(BaseModel):
+    warehouse_id: str
+    lot_id: str | None = None
+    qty: float
+    reason: str = ""
+
+
+@router.post("/skus/{sid}/convert-usage")
+def convert_usage(sid: str, body: ConvertIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """转用途：把一部分库存从「转卖」转成「自用」（或反过来）。没有对应商品时自动建「…（自用）」。"""
+    require(u, "inventory.post")
+    from .. import usage as us
+    s = get_or_404(db, Sku, sid, "商品不存在")
+    r = us.convert(db, u, s, body.warehouse_id, body.lot_id, body.qty, body.reason)
+    db.commit()
+    return r
 
 
 class MergeIn(BaseModel):

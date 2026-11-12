@@ -3,7 +3,7 @@ import { ArrowLeft, Merge, Pencil, Plus, Power, Trash2 } from 'lucide-react'
 import { del, get, patch, post, put } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { Badge, Empty, Field, Modal, Spinner, errMsg, useLoad, useToast } from '../components/ui'
-import { CatBadge, CategoryPicker, UNCAT, saveCategory } from './categories'
+import { CatBadge, CategoryPicker, FOOD, UNCAT, saveCategory } from './categories'
 
 const KIND_COLOR: Record<string, string> = { customer: 'blue', warehouse: 'purple', supplier: 'green', accounting: 'yellow', other: 'gray' }
 const SHORT: Record<string, string> = { customer: '客户', warehouse: '外库', supplier: '供应商', accounting: 'QB', other: '旧称' }
@@ -101,7 +101,8 @@ function SkuAliases({ sku, skus, rows, onChanged, onSkuChanged, onGone }: { sku:
     <div className="space-y-3">
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2"><span className="text-lg font-semibold">{sku.name}</span>{!sku.active && <Badge color="gray">{sku.merged_into ? '已合并' : '已停用'}</Badge>}</div>
+          <div className="flex flex-wrap items-center gap-2"><span className="text-lg font-semibold">{sku.name}</span>{!sku.active && <Badge color="gray">{sku.merged_into ? '已合并' : '已停用'}</Badge>}{sku.usage && <Badge color={sku.usage === 'production' ? 'purple' : 'blue'}>{sku.usage === 'production' ? '自用' : '转卖'}</Badge>}</div>
+          {sku.twin_id && <div className="text-xs text-slate-500">{sku.usage === 'production' ? '对应转卖商品' : '对应自用商品'}：{skus.find((x: any) => x.id === sku.twin_id)?.name || '—'}</div>}
           <div className="text-xs text-slate-500">{sku.tnt_item_no ? `大统华 Item# ${sku.tnt_item_no} · ` : '还没有大统华 Item#（看到 PO 会自动补上）· '}基本单位 {sku.base_unit} · 内部编号 {sku.code}
             {sku.purchase_pack ? ` · 采购 ${sku.purchase_pack}/箱` : ''}{sku.ship_pack ? ` · 出货 ${sku.ship_pack}/箱` : ''}</div>
         </div>
@@ -168,7 +169,7 @@ const UNITS = ['箱', '磅', '包', '袋', '盒', '个', '桶', '瓶', '台']
 function SkuForm({ sku, onDone }: { sku?: any; onDone: (id?: string) => void }) {
   const toast = useToast()
   const [f, setF] = useState<any>(() => ({ name: sku?.name || '', category: sku?.category || UNCAT, tnt_item_no: sku?.tnt_item_no || '', base_unit: sku?.base_unit || '箱',
-    purchase_pack: sku?.purchase_pack ?? '', ship_pack: sku?.ship_pack ?? '', code: sku?.code || '', barcode: sku?.barcode || '' }))
+    purchase_pack: sku?.purchase_pack ?? '', ship_pack: sku?.ship_pack ?? '', code: sku?.code || '', barcode: sku?.barcode || '', usage: sku?.usage ?? '' }))
   const [busy, setBusy] = useState(false)
   const save = async () => {
     setBusy(true)
@@ -184,7 +185,18 @@ function SkuForm({ sku, onDone }: { sku?: any; onDone: (id?: string) => void }) 
     <div className="space-y-3">
       <div className="text-lg font-semibold">{sku ? `编辑「${sku.name}」` : '新建商品'}</div>
       <Field label="品名（我们自己的叫法，不能重名）"><input className="input" value={f.name} onChange={set('name')} placeholder="如 剁椒" /></Field>
-      <div><div className="label">分类</div><CategoryPicker value={f.category} onPick={(c) => setF({ ...f, category: c })} /></div>
+      <div><div className="label">分类</div><CategoryPicker value={f.category} onPick={(c) => setF({ ...f, category: c, usage: f.usage || (['原料肉', '原料菜'].includes(c) ? 'production' : FOOD.has(c) ? 'resale' : '') })} /></div>
+      {FOOD.has(f.category) && (
+        <div><div className="label">用途</div>
+          <div className="grid grid-cols-2 gap-1.5">
+            {[['resale', '转卖（卖给大统华等）'], ['production', '自用（腌制 / 切配用料）']].map(([k, l]) => (
+              <button key={k} type="button" aria-pressed={(f.usage || 'resale') === k} onClick={() => setF({ ...f, usage: k })}
+                className={`min-h-11 rounded-lg border px-2 text-sm ${(f.usage || 'resale') === k ? 'border-brand-600 bg-brand-600 font-semibold text-white' : 'border-slate-200 bg-white'}`}>{l}</button>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-slate-500">同一种货两种用途都有（如五香粉），建成两个商品：「五香粉」转卖、「五香粉（自用）」自用。录小票时可拆，库存里也能「转用途」。</p>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2">
         <Field label="大统华 Item#（可空）"><input className="input" inputMode="numeric" value={f.tnt_item_no} onChange={set('tnt_item_no')} placeholder="以后看到 PO 会自动补" /></Field>
         <Field label="基本单位"><select className="input" value={f.base_unit} onChange={set('base_unit')}>{[...new Set([...UNITS, f.base_unit])].map((x) => <option key={x}>{x}</option>)}</select></Field>

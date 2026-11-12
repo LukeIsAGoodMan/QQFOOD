@@ -328,7 +328,9 @@ def po_out(db: Session, po: PurchaseOrder, u: User, names=None, detail=True):
          "warehouse_id": po.warehouse_id, "warehouse": wh.name if wh else None, "owner": names.get(po.owner_id),
          "payment_status": po.payment_status, "payment_label": PAY_LABEL[po.payment_status], "version": po.version,
          "pending_receipts": db.query(Receipt).filter_by(po_id=po.id, status="submitted").count(),
-         "quick": po.quick, "awaiting_approval": _awaiting_approval(po), "exception_count": len(po.exceptions or []),
+         "quick": po.quick, "purchase_date": po.purchase_date, "payment_method": po.payment_method,
+         "payment_method_label": PAYMETHOD_LABEL.get(po.payment_method or "", po.payment_method), "paid_by": po.paid_by,
+         "awaiting_approval": _awaiting_approval(po), "exception_count": len(po.exceptions or []),
          "doc_type": po.doc_type, "doc_label": DOC_LABEL.get(po.doc_type, po.doc_type),
          "missing_doc": po.doc_type != "none" and po.status in ("partial", "received", "closed") and po.payment_status != "reconciled"
          and not _ev_any(db, "po", po.id, DOC_PURPOSES.get(po.doc_type, ["发票"])),
@@ -812,18 +814,35 @@ class QuickIn(BaseModel):
     doc_amount: float | None = None
     reason: str = ""  # 无票据时必填
     note: str = ""
+    purchase_date: str | None = None
+    payment_method: str = ""
+    paid_by: str = ""
+
+
+PAYMETHOD_LABEL = {"company_card": "公司卡", "cash": "现金", "personal": "个人垫付", "check": "支票", "transfer": "转账", "other": "其他", "": ""}
 
 
 @router.post("/pos/quick")
 def quick_purchase(body: QuickIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
     """一步补录：货已到手、钱多半已付。库存物料直接入账（实物为准）；超额度的进入“事后审批”。票据照片随后上传。"""
+    r = do_quick_purchase(db, u, body)
+    db.commit()
+    return r
+
+
+def do_quick_purchase(db: Session, u: User, body: QuickIn) -> dict:
     require(u, "po.manage")
+    if body.payment_method not in PAYMETHOD_LABEL:
+        raise HTTPException(400, f"付款方式需为 {' / '.join(k for k in PAYMETHOD_LABEL if k)}")
+    if body.payment_method == "personal" and not body.paid_by.strip():
+        raise HTTPException(400, "个人垫付请写是谁付的（以后报销用）")
     if body.category not in CATEGORIES or body.doc_type not in DOC_LABEL:
         raise HTTPException(400, "分类或票据类型无效")
     po = PurchaseOrder(code=_code(db, PurchaseOrder, "PO"), supplier=body.supplier, category=body.category,
                        warehouse_id=body.warehouse_id or _default_wh(db), tax=body.tax, freight=body.freight, quick=True,
                        note=("补录已完成采购。" + body.note).strip(), owner_id=u.id, created_by=u.id, status="received",
-                       doc_type=body.doc_type, invoice_no=body.doc_no)
+                       doc_type=body.doc_type, invoice_no=body.doc_no, purchase_date=(body.purchase_date or "")[:10] or None,
+                       payment_method=body.payment_method, paid_by=body.paid_by.strip())
     db.add(po)
     db.flush()
     _set_lines(db, po, [POLineIn(sku_id=l.sku_id, item_name=l.item_name, unit=l.unit, qty_ordered=l.qty, unit_price=l.unit_price)
@@ -855,6 +874,6 @@ def quick_purchase(body: QuickIn, u: User = Depends(current_user), db: Session =
     if total > limit:
         for b in db.query(User).filter_by(role="boss", active=True):
             notify(db, b.id, f"补录采购需事后审批：{po.code} {po.supplier} ${total:,.2f}", "/purchasing", dedup_key=f"poappr:{po.id}")
-    audit(db, u, "po.quick", "po", po.id, total=total, after_the_fact_approval=total > limit, doc_type=body.doc_type)
-    db.commit()
+    audit(db, u, "po.quick", "po", po.id, total=total, after_the_fact_approval=total > limit, doc_type=body.doc_type,
+          payment=body.payment_method or None, paid_by=body.paid_by or None)
     return {"id": po.id, "code": po.code, "total": total, "needs_approval": total > limit}

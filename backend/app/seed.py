@@ -92,6 +92,22 @@ def upgrade_categories():
         db.close()
 
 
+def upgrade_usage():
+    """一次性：食品商品按分类给默认用途（干货 / 冻货 = 转卖，原料肉 / 原料菜 = 自用），以后可改。"""
+    from .usage import default_usage
+    db = SessionLocal()
+    try:
+        if not db.query(User).count() or db.get(AppSetting, "migration:usage_v1"):
+            return
+        for s in db.query(Sku):
+            if not s.usage:
+                s.usage = default_usage(s.category)
+        db.add(AppSetting(key="migration:usage_v1", value={"done": True}))
+        db.commit()
+    finally:
+        db.close()
+
+
 def upgrade_brief():
     """一次性：老板总览最上面加「今日摘要」。"""
     db = SessionLocal()

@@ -24,9 +24,9 @@ router = APIRouter(prefix="/api/batches", tags=["batches"])
 SITE_TZ = ZoneInfo("America/Los_Angeles")
 from ..categories import SKU_CATEGORIES, UNCATEGORIZED, FOOD, normalize as norm_category
 KIND_LABEL = {"sku_upsert": "商品主档", "stock_count": "期初 / 盘点数量", "inbound": "调入（外库 / 公司）", "order": "客户订单（PO）",
-              "alias_upsert": "商品对照（一物多码）", "sku_merge": "合并商品"}
+              "alias_upsert": "商品对照（一物多码）", "sku_merge": "合并商品", "purchase": "采购小票"}
 KIND_PERM = {"sku_upsert": "inventory.master", "stock_count": "inventory.post", "inbound": "inventory.transfer", "order": "order.manage",
-             "alias_upsert": "inventory.master", "sku_merge": "inventory.master"}
+             "alias_upsert": "inventory.master", "sku_merge": "inventory.master", "purchase": "po.manage"}
 MAX_ROWS = 300
 
 
@@ -574,7 +574,128 @@ def _analyze_merge(db: Session, rows: list[dict]):
     return out
 
 
+PAY_NORM = {"公司卡": "company_card", "company card": "company_card", "company_card": "company_card", "信用卡": "company_card", "card": "company_card",
+            "现金": "cash", "cash": "cash", "个人垫付": "personal", "垫付": "personal", "personal": "personal", "支票": "check", "check": "check",
+            "转账": "transfer", "transfer": "transfer", "zelle": "transfer", "其他": "other", "other": "other", "": ""}
+
+
+def _num(v):
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _auto_lot(meta: dict) -> str:
+    """超市 / 批发店买的食品没有 Lot：按 商家-日期 自动编一个，能追溯到这次采购。"""
+    sup = "".join(ch for ch in str(meta.get("supplier") or "").upper() if ch.isalnum())[:10] or "RCPT"
+    d = str(meta.get("purchase_date") or "")[:10].replace("-", "")
+    return f"{sup}-{d[2:] if len(d) == 8 else datetime.now(SITE_TZ).strftime('%y%m%d')}"
+
+
+def purchase_dups(db: Session, meta: dict, exclude_batch: str | None = None) -> list[str]:
+    """同一家店、同一天、同一个金额，或同一个小票号 → 可能重复录入。"""
+    from ..models import PurchaseOrder
+    sup, no, total, day = _norm(meta.get("supplier")), str(meta.get("receipt_no") or "").strip(), _num(meta.get("total")), (meta.get("purchase_date") or "")[:10]
+    hits = []
+    for po in db.query(PurchaseOrder).filter(PurchaseOrder.status != "cancelled"):
+        if _norm(po.supplier) != sup:
+            continue
+        if (no and (po.invoice_no or "").strip() == no) or (day and po.purchase_date == day and total is not None
+                                                           and po.invoice_amount is not None and abs(po.invoice_amount - total) < 0.01):
+            hits.append(po.code)
+    for b in db.query(BatchProposal).filter_by(kind="purchase", status="proposed"):
+        if b.id == exclude_batch:
+            continue
+        m = b.meta or {}
+        if _norm(m.get("supplier")) == sup and ((no and str(m.get("receipt_no") or "").strip() == no) or
+                                               (day and (m.get("purchase_date") or "")[:10] == day and _num(m.get("total")) == total)):
+            hits.append(b.code)
+    return hits
+
+
+def _analyze_purchase(db: Session, meta: dict, rows: list[dict], batch_id: str | None = None):
+    from . import aliases as al
+    from .. import usage as us
+    skus = {s.code: s for s in db.query(Sku)}
+    whs = {w.code: w for w in db.query(Warehouse)}
+    header = []
+    if not str(meta.get("supplier") or "").strip():
+        header.append("缺少商家 / 供应商")
+    w = _find_wh(whs, meta.get("warehouse_code") or "WH597")
+    if not w or not w.tracked:
+        header.append("入库仓不存在或不管账")
+    if str(meta.get("payment_method") or "").strip().lower() not in PAY_NORM:
+        header.append("付款方式需为 公司卡 / 现金 / 个人垫付 / 支票 / 转账 / 其他")
+    elif PAY_NORM[str(meta.get("payment_method") or "").strip().lower()] == "personal" and not str(meta.get("paid_by") or "").strip():
+        header.append("个人垫付请写是谁付的（paid_by，以后报销用）")
+    dups = purchase_dups(db, meta, batch_id)
+    out, lines_sum = [], 0.0
+    for r in rows:
+        res = {"key": str(r.get("party_name") or r.get("description") or r.get("name") or r.get("party_code") or "").strip(),
+               "action": "error", "messages": list(header), "changes": {}}
+        qty, price, amount = _num(r.get("qty")), _num(r.get("unit_price")), _num(r.get("amount"))
+        if not qty or qty <= 0:
+            res["messages"].append("数量需大于 0")
+        if amount is None and price is not None and qty:
+            amount = round(qty * price, 2)
+        if amount is None:
+            res["messages"].append("没有金额（单价 / 小计都没有）：确认后按 0 记，请核对")
+            amount = 0.0
+        lines_sum += amount
+        res["amount"] = amount
+        if dups:
+            res["suspect"] = True
+            res["messages"].append(f"可能重复：{'、'.join(dups)} 也是这家店、同一张小票 / 同一天同金额（默认不勾）")
+        if any(m for m in res["messages"] if m in header) or not qty or qty <= 0:
+            out.append(res)
+            continue
+        hint = str(r.get("usage") or "").strip().lower()
+        if hint in ("expense", "费用", "不入库"):
+            res.update({"action": "expense", "changes": {"费用（不入库）": [None, f"${amount:,.2f}"]}})
+            out.append(res)
+            continue
+        m = al.resolve_row(db, r, "supplier", meta.get("supplier") or "", skus)
+        sku = m["sku"] if m["sku"] is not None and m["sku"].active is not False else None
+        if not sku:
+            res["action"] = "unmapped"
+            res["changes"] = {"数量": [None, f"{qty:g} {r.get('unit') or ''}".strip()], "金额": [None, f"${amount:,.2f}"]}
+            res["messages"].append("还没对上我们的商品：选一个商品（确认后记住这家店的叫法），或标「不入库（费用）」")
+            out.append(res)
+            continue
+        qb, err = al.to_base_qty(sku, qty, r.get("unit"), m["alias"])
+        if err:
+            res["action"] = "unmapped"
+            res["sku_id"] = sku.id
+            res["messages"].append(err)
+            out.append(res)
+            continue
+        if m["how"] == "name_contains":
+            res["messages"].append(f"按品名认作「{sku.name}」，请核对；确认后记住")
+        lot = str(r.get("lot_code") or "").strip()
+        if not lot and sku.category in FOOD:
+            lot = _auto_lot(meta)
+            res["messages"].append(f"小票没有 Lot，自动编 {lot}（能追溯到这次采购）")
+        self_q = _num(r.get("self_qty")) or 0
+        if hint in ("production", "自用", "生产") and (sku.usage or "resale") == "resale" and not self_q:
+            self_q = qb
+        self_q = min(max(self_q, 0), qb) if (sku.usage or "resale") == "resale" and sku.category in FOOD else 0
+        res.update({"action": "stock", "sku_id": sku.id, "qty_base": qb, "unit": sku.base_unit, "lot_code": lot, "self_qty": self_q,
+                    "usage": sku.usage, "remember": _should_remember(r, m["how"]) or m["how"] in ("name_exact",)})
+        dest = f"{sku.name} {qb - self_q:g} {sku.base_unit}" if qb - self_q > 1e-9 else ""
+        if self_q:
+            dest = (dest + "；" if dest else "") + f"自用 {self_q:g} {sku.base_unit} → 「{sku.name}{us.SUFFIX}」"
+        res["changes"] = {"入库": [None, dest], "金额": [None, f"${amount:,.2f}"]}
+        out.append(res)
+    tax, total = _num(meta.get("tax")) or 0, _num(meta.get("total"))
+    if total is not None and abs(lines_sum + tax - total) > 0.02 and out:
+        out[0]["messages"].append(f"金额对不上：各行 ${lines_sum:,.2f} + 税 ${tax:,.2f} = ${lines_sum + tax:,.2f}，小票总额 ${total:,.2f}（可能漏了行或折扣）")
+    return out
+
+
 def analyze(db: Session, b: BatchProposal):
+    if b.kind == "purchase":
+        return _analyze_purchase(db, b.meta or {}, b.rows, b.id)
     if b.kind == "sku_merge":
         return _analyze_merge(db, b.rows)
     if b.kind == "order":
@@ -754,6 +875,54 @@ def apply(bid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
             else:
                 txn(db, p, sku.id, w.id, "unverified", qty_b - unv, lot_id)
             applied.append(i)
+    elif b.kind == "purchase":
+        from . import aliases as al
+        from .. import usage as us
+        from .purchasing import QuickIn, QuickLine, do_quick_purchase
+        from ..models import EvidenceLink, EvidenceVersion
+        from .evidence import create_link
+        meta = b.meta or {}
+        whs = {w.code: w for w in db.query(Warehouse)}
+        w = _find_wh(whs, meta.get("warehouse_code") or "WH597")
+        qlines = []
+        for i in chosen:
+            a, r = an[i], b.rows[i]
+            ov = body.overrides.get(str(i)) or body.overrides.get(i) or {}
+            if a["action"] == "error":
+                skipped.append(i)
+                continue
+            qty = float(r.get("qty"))
+            if ov.get("expense") or (a["action"] == "expense" and not ov.get("sku_id")):
+                qlines.append(QuickLine(item_name=a["key"] or "费用", unit=r.get("unit") or "", qty=qty, unit_price=round(a["amount"] / qty, 4)))
+                applied.append(i)
+                continue
+            pick = _pick(db, b, an, i, body, ("stock",))
+            if not pick:
+                skipped.append(i)
+                continue
+            sku, qb, factor, remember = pick
+            if remember:
+                al.remember_from_row(db, u, r, "supplier", meta.get("supplier"), sku, factor)
+            lot = a.get("lot_code") or str(r.get("lot_code") or "").strip() or (_auto_lot(meta) if sku.category in FOOD else None)
+            self_q = _num(ov.get("self_qty")) if ov.get("self_qty") not in (None, "") else (a.get("self_qty") or 0)
+            self_q = min(max(self_q or 0, 0), qb) if (sku.usage or "resale") == "resale" and sku.category in FOOD else 0
+            price = round(a["amount"] / qb, 4) if qb else 0
+            if qb - self_q > 1e-9:
+                qlines.append(QuickLine(sku_id=sku.id, unit=sku.base_unit, qty=round(qb - self_q, 4), unit_price=price, lot_code=lot))
+            if self_q > 1e-9:
+                t = us.twin(db, u, sku)
+                qlines.append(QuickLine(sku_id=t.id, unit=t.base_unit, qty=round(self_q, 4), unit_price=price, lot_code=lot))
+            applied.append(i)
+        if qlines:
+            pay = PAY_NORM.get(str(meta.get("payment_method") or "").strip().lower(), "other")
+            r = do_quick_purchase(db, u, QuickIn(
+                supplier=str(meta.get("supplier")).strip(), category="原料包材" if any(l.sku_id for l in qlines) else "日常用品",
+                warehouse_id=w.id if w else None, lines=qlines, tax=_num(meta.get("tax")) or 0, paid=True, doc_type="receipt",
+                doc_no=str(meta.get("receipt_no") or ""), doc_amount=_num(meta.get("total")), purchase_date=meta.get("purchase_date"),
+                payment_method=pay, paid_by=str(meta.get("paid_by") or ""), note=f"{b.code} 小票录入。{body.note}".strip()))
+            for l in db.query(EvidenceLink).filter_by(target_type="batch", target_id=b.id, active=True):  # 小票原件跟到采购单
+                create_link(db, u, db.get(EvidenceVersion, l.evidence_version_id), "po", r["id"], l.purpose)
+            b.result = {**(b.result or {}), "po_id": r["id"], "po_code": r["code"], "needs_approval": r["needs_approval"]}
     elif b.kind == "sku_merge":
         from .. import sku_merge
         for i in chosen:

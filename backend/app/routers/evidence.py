@@ -91,7 +91,7 @@ def create_link(db: Session, u: User, ver: EvidenceVersion, target_type: str, ta
         from ..models import BatchProposal
         b = db.get(BatchProposal, target_id)
         r = (b.result or {}) if b else {}
-        for t, k in (("so", "order_id"), ("transfer", "transfer_id")):
+        for t, k in (("so", "order_id"), ("transfer", "transfer_id"), ("po", "po_id")):
             if r.get(k):
                 create_link(db, u, ver, t, r[k], purpose, item_key)
     return l

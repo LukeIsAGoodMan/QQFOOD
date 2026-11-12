@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 # kind → (中文, 建议上传的证据, 上传用途默认值)
 GUIDE = {
-    "purchase": ("采购", ["供应商发票 / 报价 PDF", "送货单 / BOL 照片", "到货照片（外箱、标签、温度）", "付款凭证"], "发票"),
+    "purchase": ("采购", ["小票 / 供应商发票（照片或 PDF）", "送货单 / BOL 照片", "到货照片（外箱、标签、温度）", "付款凭证"], "小票"),
     "receipt": ("采购收货", ["送货单 / 签收单照片", "到货照片（外箱、标签、温度计读数）", "拒收 / 破损照片"], "签收单"),
     "stock_count": ("库存盘点", ["盘点表照片", "外库库存报表 PDF / 截图", "货架 / 冷库照片"], "盘点表"),
     "inbound": ("调入 / 外库", ["BOL / 调货单 PDF 或照片", "到货照片", "差异 / 破损照片"], "BOL"),
@@ -76,12 +76,12 @@ def missing(db: Session, days: int = 30, limit: int = 50) -> list[dict]:
     def aware(t):
         return t if not t or t.tzinfo else t.replace(tzinfo=timezone.utc)
 
-    for b in db.query(BatchProposal).filter(BatchProposal.kind.in_(["stock_count", "inbound", "order"]), BatchProposal.status != "rejected"):
+    for b in db.query(BatchProposal).filter(BatchProposal.kind.in_(["stock_count", "inbound", "order", "purchase"]), BatchProposal.status != "rejected"):
         if aware(b.created_at) < since:
             continue
         r = b.result or {}
         # 已确认的批次：证据挂在批次或其生成的单据上都算
-        if r.get("order_id") and ("so", r["order_id"]) in linked or r.get("transfer_id") and ("transfer", r["transfer_id"]) in linked:
+        if any(r.get(k) and (t, r[k]) in linked for t, k in (("so", "order_id"), ("transfer", "transfer_id"), ("po", "po_id"))):
             continue
         add(b.kind, "batch", b.id, f"{b.code}（{b.source_note[:30]}）", b.created_at, b.status, (b.meta or {}).get("proof_note", ""), f"/ingest?batch={b.id}")
     for s in db.query(Shipment):

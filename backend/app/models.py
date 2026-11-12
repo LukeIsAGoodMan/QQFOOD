@@ -255,6 +255,10 @@ class Sku(Base):
     ship_pack: Mapped[float | None] = mapped_column(Float, nullable=True)      # 出货：每箱目标量（如 鸡丁 50 磅/箱）
     active: Mapped[bool] = mapped_column(Boolean, default=True)   # 停用 / 已合并的商品不出现在选择列表里，历史照常可查
     merged_into: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 用途（食品）：resale 转卖（卖给大统华等）| production 自用（腌制、切配用料）；非食品为空。
+    # 同一种货两种用途都有时建成两个商品互相关联（twin_id），如「五香粉」与「五香粉（自用）」。
+    usage: Mapped[str] = mapped_column(String(16), default="")
+    twin_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class SafetyStock(Base):
@@ -619,6 +623,9 @@ class PurchaseOrder(Base):
     doc_type: Mapped[str] = mapped_column(String(16), default="invoice")  # invoice 发票 | receipt 收据 | none 无票据（例外）
     exceptions: Mapped[list] = mapped_column(JSON, default=list)  # [{step, reason, by, at}] 例外记录，永久保留
     quick: Mapped[bool] = mapped_column(Boolean, default=False)  # 补录的已完成采购
+    purchase_date: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 小票 / 票据上的日期
+    payment_method: Mapped[str] = mapped_column(String(20), default="")  # company_card 公司卡 | cash 现金 | personal 个人垫付 | check 支票 | transfer 转账 | other
+    paid_by: Mapped[str] = mapped_column(String(100), default="")  # 个人垫付时谁付的（以后接报销）
     # none invoiced paid_pending reconciled
     payment_status: Mapped[str] = mapped_column(String(20), default="none")
     reconcile: Mapped[dict] = mapped_column(JSON, default=dict)

@@ -169,7 +169,7 @@ export function StockModule(_: ModProps) {
               <div className="flex items-start gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{r.sku_name}</div>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500"><CatBadge c={catOf(r)} /><span>{r.warehouse}{r.warehouse_kind === 'external' && ' · 外库'}</span></div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500"><CatBadge c={catOf(r)} />{skuOf(r.sku_id)?.usage === 'production' && <Badge color="purple">自用</Badge>}<span>{r.warehouse}{r.warehouse_kind === 'external' && ' · 外库'}</span></div>
                 </div>
                 <div className="text-right">
                   <div className={`text-2xl font-bold leading-none ${r.below_safety ? 'text-red-600' : ''}`}>{num(r.available)}</div>
@@ -197,6 +197,7 @@ export function StockModule(_: ModProps) {
                         {l.lot_id && <button className="btn-ghost btn-sm" onClick={() => setDlg({ type: 'label', sku: skuOf(r.sku_id), lot: l })}><Printer size={14} />标签</button>}
                         {can('inventory.post') && <button className="btn-ghost btn-sm" onClick={() => setDlg({ type: 'count', row: r, lot: l })}>核数</button>}
                         {can('inventory.post') && l.on_hand > 0 && <button className="btn-ghost btn-sm" onClick={() => setDlg({ type: 'issue', row: r, lot: l })}>出库</button>}
+                        {can('inventory.post') && l.on_hand > 0 && FOOD.has(catOf(r)) && <button className="btn-ghost btn-sm" onClick={() => setDlg({ type: 'usage', row: r, lot: l })}>转用途</button>}
                       </div>
                     </div>
                   ))}
@@ -243,6 +244,7 @@ export function StockModule(_: ModProps) {
                         {l.lot_id && <button className="btn-ghost btn-sm" onClick={() => setDlg({ type: 'label', sku: skuOf(r.sku_id), lot: l })}><Printer size={12} /></button>}
                         {can('inventory.post') && <button className="btn-ghost btn-sm" onClick={() => setDlg({ type: 'count', row: r, lot: l })}>核数</button>}
                         {can('inventory.post') && l.on_hand > 0 && <button className="btn-ghost btn-sm" onClick={() => setDlg({ type: 'issue', row: r, lot: l })}>出库</button>}
+                        {can('inventory.post') && l.on_hand > 0 && FOOD.has(catOf(r)) && <button className="btn-ghost btn-sm" onClick={() => setDlg({ type: 'usage', row: r, lot: l })}>转用途</button>}
                       </td>
                     </tr>
                   ))}
@@ -253,6 +255,7 @@ export function StockModule(_: ModProps) {
         </table>
       </div>
       {!rows.length && <Empty />}
+      {dlg?.type === 'usage' && <UsageDialog sku={skuOf(dlg.row.sku_id)} skus={master.data.skus} row={dlg.row} lot={dlg.lot} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'classify' && <ClassifyDialog skus={master.data.skus} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'receive' && <ReceiveDialog master={master.data} onClose={() => setDlg(null)} onDone={reload} />}
       {dlg?.type === 'count' && <CountDialog master={master.data} row={dlg.row} lot={dlg.lot} onClose={() => setDlg(null)} onDone={reload} />}
@@ -656,5 +659,30 @@ export function TraceModule(_: ModProps) {
         </div>
       )}
     </div>
+  )
+}
+
+/** 转用途：转卖 ↔ 自用（同一袋货买回来再决定多少腌制用）。Lot 跟过去，留审计。 */
+function UsageDialog({ sku, skus, row, lot, onClose, onDone }: any) {
+  const toast = useToast()
+  const [qty, setQty] = useState('')
+  const [reason, setReason] = useState('')
+  const self = (sku?.usage || 'resale') === 'resale'
+  const twin = sku?.twin_id && skus.find((x: any) => x.id === sku.twin_id)
+  const target = twin?.name || (self ? `${sku?.name}（自用）` : sku?.name.replace('（自用）', ''))
+  const save = async () => {
+    try {
+      const r = await post(`/api/inv/skus/${row.sku_id}/convert-usage`, { warehouse_id: row.warehouse_id, lot_id: lot.lot_id || null, qty: Number(qty), reason })
+      toast(`已转 ${r.qty} 到「${r.to}」`); onClose(); onDone()
+    } catch (e) { toast(errMsg(e), 'err') }
+  }
+  return (
+    <Modal open onClose={onClose} title={`转用途：${row.sku_name}`} footer={<button className="btn-primary" disabled={!Number(qty)} onClick={save}>确认转过去</button>}>
+      <div className="space-y-3">
+        <p className="text-sm text-slate-600">把 Lot <b>{lot.lot_code}</b> 的一部分从「{self ? '转卖' : '自用'}」转成「{self ? '自用' : '转卖'}」，记到「{target}」{!twin && '（没有这个商品，会自动建）'}。实物不动，只是分开记账。</p>
+        <Field label={`数量（${row.unit}，最多 ${lot.on_hand}）`}><input className="input" type="number" inputMode="decimal" value={qty} onChange={(e) => setQty(e.target.value)} /></Field>
+        <Field label="原因（可空）"><input className="input" placeholder="如：这周腌料不够" value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      </div>
+    </Modal>
   )
 }
