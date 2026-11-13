@@ -82,6 +82,28 @@ def reset_demo(body: ResetIn, u: User = Depends(current_user), db: Session = Dep
             "deactivated_users": deactivated}
 
 
+class RepairIn(BaseModel):
+    shipment_ids: list[str]
+    reason: str
+    confirm: str
+
+
+@router.get("/repair/historical-shipments")
+def repair_preview(u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """预览：哪些补录的历史送货可能重复扣了库存（只读，不改任何数据）。"""
+    from .. import repair
+    if u.role not in ("boss", "sys_admin"):
+        raise HTTPException(403, "只有老板或系统管理员可以查看库存修复")
+    return repair.preview(db)
+
+
+@router.post("/repair/historical-shipments")
+def repair_apply(body: RepairIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """执行：先备份数据库，再对选中的送货单记冲销流水（不删除任何记录）。"""
+    from .. import repair
+    return repair.apply(db, u, body.shipment_ids, body.reason, body.confirm)
+
+
 @router.get("/status")
 def status(u: User = Depends(current_user), db: Session = Depends(get_db)):
     s = db.get(AppSetting, "demo_cleared")

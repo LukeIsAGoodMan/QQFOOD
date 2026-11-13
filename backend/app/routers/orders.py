@@ -25,7 +25,8 @@ router = APIRouter(prefix="/api/orders", tags=["orders"])
 SITE_TZ = ZoneInfo("America/Los_Angeles")
 OPEN = ["confirmed", "partial"]
 STATUS_LABEL = {"confirmed": "待发货", "partial": "部分发货", "shipped": "已发货", "delivered": "已送达", "closed": "已关闭", "cancelled": "已取消"}
-POD_PURPOSES = ["签收单", "POD", "收货单照片", "送货照片"]
+from .. import fulfillment as ff
+POD_PURPOSES = list(ff.POD_PURPOSES)
 CATCH_TOLERANCE = 0.10  # 称重行允许比订量多 10%
 
 
@@ -389,15 +390,18 @@ def fefo_lots(db: Session, sku_id: str, wh_id: str):
     return out
 
 
-def line_out(db, l: SOLine, so: SalesOrder, skus, detail=False):
+def line_out(db, l: SOLine, so: SalesOrder, skus, detail=False, delivered=None):
     sku = skus.get(l.sku_id)
-    remaining = max(l.qty_ordered - l.qty_shipped, 0)
+    remaining = ff.line_remaining(l)
     shipped_amount = round(max(l.qty_shipped - l.qty_rejected, 0) * l.price, 2)
     d = {"id": l.id, "line_no": l.line_no, "item_no": l.item_no, "description": l.description, "pack_size": l.pack_size,
          "order_unit": l.order_unit, "qty_ordered": l.qty_ordered, "price": l.price, "amount": round(l.qty_ordered * l.price, 2),
          "sku_id": l.sku_id, "sku_code": sku.code if sku else None, "sku_name": sku.name if sku else None, "base_unit": sku.base_unit if sku else None,
          "factor": l.factor, "catch_weight": l.catch_weight, "qty_shipped": round(l.qty_shipped, 3), "boxes_shipped": l.boxes_shipped,
-         "qty_rejected": l.qty_rejected, "reject_reason": l.reject_reason, "remaining": round(remaining, 3), "shipped_amount": shipped_amount}
+         "qty_rejected": l.qty_rejected, "reject_reason": l.reject_reason, "remaining": round(remaining, 3), "shipped_amount": shipped_amount,
+         "qty_delivered": (delivered or {}).get(l.id, 0.0), "qty_closed": l.qty_closed, "balance_status": l.balance_status,
+         "balance_label": ff.BALANCE.get(l.balance_status, ("", False))[0], "balance_reason": l.balance_reason, "balance_ref": l.balance_ref,
+         "balance_at": l.balance_at, "base_per_unit": l.factor, "base_needed": ff.to_base(remaining, l.factor)}
     if detail and sku and so.warehouse_id:
         need_base = remaining * l.factor
         avail = available_base(db, sku.id, so.warehouse_id)
@@ -412,6 +416,24 @@ def line_out(db, l: SOLine, so: SalesOrder, skus, detail=False):
     return d
 
 
+def shipment_out(db: Session, s: Shipment, by_id: dict, names: dict) -> dict:
+    pst = ff.pod_status(db, s)
+    items = []
+    for r in s.lines or []:
+        l = by_id.get(r["line_id"])
+        items.append({**r, "line_no": l.line_no if l else None, "description": l.description if l else "", "item_no": l.item_no if l else "",
+                      "order_unit": l.order_unit if l else "", "amount": round(float(r.get("qty") or 0) * (l.price if l else 0), 2)})
+    return {"id": s.id, "code": s.code, "delivery_no": s.delivery_no, "status": s.status, "status_label": ff.SH_STATUS.get(s.status, s.status),
+            "lines": items, "total": round(sum(i["amount"] for i in items), 2),
+            "shipped_by": names.get(s.shipped_by), "shipped_at": s.shipped_at, "shipped_on": s.shipped_on or (s.shipped_at.date().isoformat() if s.shipped_at else None),
+            "delivered_by": names.get(s.delivered_by), "delivered_at": s.delivered_at, "delivered_on": s.delivered_on, "received_by": s.received_by,
+            "note": s.note, "inventory_effect": s.inventory_effect,
+            "inventory_label": {"issued": "已扣库存", "historical": "历史补录（库存已在盘点里体现，未扣）", "reversed_historical": "补录时误扣，已冲销"}.get(s.inventory_effect, s.inventory_effect),
+            "pod_status": pst, "pod_label": ff.POD_LABEL[pst],
+            "pod": db.query(EvidenceLink).filter(EvidenceLink.target_type == "shipment", EvidenceLink.target_id == s.id,
+                                                 EvidenceLink.active, EvidenceLink.purpose.in_(POD_PURPOSES)).count()}
+
+
 def order_out(db: Session, so: SalesOrder, u: User | None = None, detail=True, names=None):
     names = names or _names(db)
     cust = db.get(Customer, so.customer_id)
@@ -420,27 +442,37 @@ def order_out(db: Session, so: SalesOrder, u: User | None = None, detail=True, n
     lines = db.query(SOLine).filter_by(order_id=so.id).order_by(SOLine.line_no).all()
     t = today().isoformat()
     open_ = so.status in OPEN
+    owing = open_ and any(ff.owes(l) and l.balance_status != "backordered" for l in lines)
+    delivered = ff.delivered_qty(db, so)
+    pst = ff.po_status(so, lines)
+    ships = db.query(Shipment).filter_by(order_id=so.id).order_by(Shipment.shipped_at).all()
+    latest = ships[-1] if ships else None
     d = {"id": so.id, "code": so.code, "po_no": so.po_no, "po_date": so.po_date, "required_date": so.required_date, "category": so.category,
          "status": so.status, "status_label": STATUS_LABEL[so.status], "customer": cust.name, "customer_id": cust.id, "customer_code": cust.code, "customer_accounting_name": cust.accounting_name or cust.name,
          "site": site.name if site else None, "site_id": so.site_id, "total": round(sum(l.qty_ordered * l.price for l in lines), 2),
          "shipped_amount": round(sum(max(l.qty_shipped - l.qty_rejected, 0) * l.price for l in lines), 2),
-         "overdue": bool(open_ and so.required_date and so.required_date < t),
-         "due_soon": bool(open_ and so.required_date and t <= so.required_date <= (today() + timedelta(days=1)).isoformat()),
+         "overdue": bool(owing and so.required_date and so.required_date < t),
+         "due_soon": bool(owing and so.required_date and t <= so.required_date <= (today() + timedelta(days=1)).isoformat()),
+         "po_status": pst, "po_status_label": ff.PO_STATUS[pst],
+         "latest_delivery": {"code": latest.code, "status": latest.status, "label": ff.SH_STATUS.get(latest.status, latest.status),
+                             "delivered_on": latest.delivered_on} if latest else None,
+         "delivered_amount": round(sum(delivered.get(l.id, 0) * l.price for l in lines), 2),
+         "remaining_amount": round(sum(ff.line_remaining(l) * l.price for l in lines), 2),
+         "closed_amount": round(sum(min(l.qty_closed, max(l.qty_ordered - l.qty_shipped, 0)) * l.price for l in lines), 2),
+         "backordered": any(l.balance_status == "backordered" and ff.owes(l) for l in lines),
          "unmapped": sum(1 for l in lines if not l.sku_id), "lines_count": len(lines), "version": so.version, "source": so.source,
          "exception_count": len(so.exceptions or []), "created_at": so.created_at}
     if not detail:
         return d
     wh = db.get(Warehouse, so.warehouse_id) if so.warehouse_id else None
-    shipments = db.query(Shipment).filter_by(order_id=so.id).order_by(Shipment.shipped_at).all()
+    shipments = ships
+    by_id = {l.id: l for l in lines}
     d.update({
         "note": so.note, "warehouse": wh.name if wh else None, "warehouse_id": so.warehouse_id, "vendor_no": cust.vendor_no,
         "invoice_email": cust.invoice_email,
         "site_detail": {k: getattr(site, k) for k in ("name", "store_no", "address", "dept", "contact", "phone", "email")} if site else None,
-        "lines": [line_out(db, l, so, skus, detail=True) for l in lines],
-        "shipments": [{"id": s.id, "code": s.code, "status": s.status, "lines": s.lines, "shipped_by": names.get(s.shipped_by), "shipped_at": s.shipped_at,
-                       "delivered_by": names.get(s.delivered_by), "delivered_at": s.delivered_at, "note": s.note,
-                       "pod": db.query(EvidenceLink).filter(EvidenceLink.target_type == "shipment", EvidenceLink.target_id == s.id,
-                                                            EvidenceLink.active, EvidenceLink.purpose.in_(POD_PURPOSES)).count()} for s in shipments],
+        "lines": [line_out(db, l, so, skus, detail=True, delivered=delivered) for l in lines],
+        "shipments": [shipment_out(db, s, by_id, names) for s in shipments],
         "exceptions": [{**e, "by_name": names.get(e.get("by"))} for e in (so.exceptions or [])],
         "can": {"manage": bool(u and can(u, "order.manage")), "ship": bool(u and can(u, "order.ship"))},
     })
@@ -526,6 +558,39 @@ def map_line(lid: str, body: MapLineIn, u: User = Depends(current_user), db: Ses
     return order_out(db, so, u)
 
 
+class FactorIn(BaseModel):
+    factor: float          # 客户 1 个订货单位 = 我们多少个基本单位（卤水料包：大统华 1 单位 10 包，我们 1 箱 20 包 → 0.5）
+    reason: str = ""
+
+
+@router.post("/lines/{lid}/factor")
+def set_line_factor(lid: str, body: FactorIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """改换算：这一行、这个客户对照、以及同品项还没发的订单行都按新换算发货。已发出的送货单记的是当时实际扣的数，不受影响。"""
+    require(u, "order.manage")
+    l = get_or_404(db, SOLine, lid)
+    so = db.get(SalesOrder, l.order_id)
+    if not l.sku_id:
+        raise HTTPException(409, "先给这一行配对商品")
+    if body.factor <= 0:
+        raise HTTPException(400, "换算需大于 0")
+    new = ff.q4(body.factor)
+    old = l.factor
+    l.factor = new
+    ci = match_item(db, so.customer_id, l.item_no, l.description)
+    if ci and ci.sku_id == l.sku_id:
+        ci.factor, ci.updated_at = new, _now()
+    others = 0
+    for x in db.query(SOLine).join(SalesOrder, SalesOrder.id == SOLine.order_id).filter(
+            SalesOrder.customer_id == so.customer_id, SalesOrder.status.in_(OPEN), SOLine.sku_id == l.sku_id, SOLine.id != l.id,
+            SOLine.item_no == l.item_no, SOLine.qty_shipped == 0):
+        x.factor = new
+        others += 1
+    so.version += 1
+    audit(db, u, "order.line_factor", "so", so.id, line=l.line_no, item_no=l.item_no, before=old, after=new, other_open_lines=others, reason=body.reason or None)
+    db.commit()
+    return order_out(db, so, u)
+
+
 # ---------- ship ----------
 class Pick(BaseModel):
     lot_id: str | None = None
@@ -544,6 +609,10 @@ class ShipIn(BaseModel):
     lines: list[ShipLine]
     note: str = ""
     over_reason: str = ""
+    delivery_no: str = ""          # 我们的送货单号（如 QQUSA20261108）
+    shipped_on: str | None = None  # 实际发货日期（默认今天）
+    historical: bool = False       # 历史补录：这批货的出库已经体现在盘点 / 期初的净结存里 → 不再扣库存
+    historical_reason: str = ""
 
 
 def _add_exc(db, so, u, step, reason):
@@ -559,10 +628,15 @@ def ship(oid: str, body: ShipIn, u: User = Depends(current_user), db: Session = 
     so = get_or_404(db, SalesOrder, oid)
     if so.status not in OPEN:
         raise HTTPException(409, f"订单状态为「{STATUS_LABEL[so.status]}」，不能发货")
+    if body.historical and not body.historical_reason.strip():
+        raise HTTPException(400, "历史补录不扣库存，需写明原因（如：11/5 期初盘点的 81 箱已是扣掉这次送货后的净结存）")
+    shipped_on = (body.shipped_on or today().isoformat())[:10]
     try:
-        p = begin_posting(db, u, body.idempotency_key, "issue", "order", so.po_no, f"{so.code} PO {so.po_no}")
+        p = begin_posting(db, u, body.idempotency_key, "issue_historical" if body.historical else "issue", "order", so.po_no, f"{so.code} PO {so.po_no}")
     except Dup:
         return {"duplicate": True, "order": order_out(db, so, u)}
+    p.effective_at = shipped_on
+    hist = body.historical
     lines = {l.id: l for l in db.query(SOLine).filter_by(order_id=so.id)}
     shipped_rows, over = [], []
     for sl in body.lines:
@@ -585,7 +659,8 @@ def ship(oid: str, body: ShipIn, u: User = Depends(current_user), db: Session = 
                 have = balance(db, b.sku_id, b.warehouse_id, "on_hand", b.lot_id)
                 if b.weight > have + 1e-6:
                     raise HTTPException(409, f"箱 {b.serial} 所在批次账面不足（{have}），请先核对库存")
-                txn(db, p, b.sku_id, b.warehouse_id, "on_hand", -b.weight, b.lot_id)
+                if not hist:
+                    txn(db, p, b.sku_id, b.warehouse_id, "on_hand", -b.weight, b.lot_id)
                 b.status, b.shipment_id = "shipped", None
                 weight += b.weight
             if l.qty_shipped + weight > l.qty_ordered * (1 + CATCH_TOLERANCE) + 1e-6:
@@ -598,10 +673,17 @@ def ship(oid: str, body: ShipIn, u: User = Depends(current_user), db: Session = 
         else:
             if sl.qty is None and not sl.picks:
                 continue
-            need_base = (sl.qty if sl.qty is not None else sum(pk.qty for pk in sl.picks) / l.factor) * l.factor
+            need_base = ff.to_base(sl.qty, l.factor) if sl.qty is not None else ff.q4(sum(ff.D(pk.qty) for pk in sl.picks))
             if need_base <= 0:
                 continue
             picks = sl.picks
+            if hist:  # 历史补录：只记送了什么，不动库存（不拣批次、不扣数）
+                qty_units = ff.to_order_units(need_base, l.factor)
+                if l.qty_shipped + qty_units > l.qty_ordered + 1e-6:
+                    over.append(f"第 {l.line_no} 行 发 {round(l.qty_shipped + qty_units, 2)} 超过订量 {l.qty_ordered}")
+                l.qty_shipped = ff.q4(ff.D(l.qty_shipped) + ff.D(qty_units))
+                shipped_rows.append({"line_id": l.id, "qty": qty_units, "base_qty": need_base, "picks": [], "lots": []})
+                continue
             if not picks:
                 picks, left = [], need_base
                 for lot in fefo_lots(db, l.sku_id, so.warehouse_id):
@@ -621,11 +703,12 @@ def ship(oid: str, body: ShipIn, u: User = Depends(current_user), db: Session = 
                     raise HTTPException(409, f"批次账面不足：现有 {have}")
                 txn(db, p, l.sku_id, so.warehouse_id, "on_hand", -pk.qty, pk.lot_id)
                 lots_used.append({"lot_id": pk.lot_id, "lot_code": db.get(Lot, pk.lot_id).lot_code if pk.lot_id else "(无批次)", "qty": pk.qty})
-            qty_units = round(sum(pk.qty for pk in picks) / l.factor, 4)
+            base_total = ff.q4(sum(ff.D(pk.qty) for pk in picks))
+            qty_units = ff.to_order_units(base_total, l.factor)
             if l.qty_shipped + qty_units > l.qty_ordered + 1e-6:
                 over.append(f"第 {l.line_no} 行 发 {round(l.qty_shipped + qty_units, 2)} 超过订量 {l.qty_ordered}")
-            l.qty_shipped += qty_units
-            shipped_rows.append({"line_id": l.id, "qty": qty_units, "picks": lots_used, "lots": [x["lot_code"] for x in lots_used]})
+            l.qty_shipped = ff.q4(ff.D(l.qty_shipped) + ff.D(qty_units))
+            shipped_rows.append({"line_id": l.id, "qty": qty_units, "base_qty": base_total, "picks": lots_used, "lots": [x["lot_code"] for x in lots_used]})
     if not shipped_rows:
         raise HTTPException(400, "没有填写任何发货数量或扫箱")
     if over:
@@ -633,15 +716,17 @@ def ship(oid: str, body: ShipIn, u: User = Depends(current_user), db: Session = 
         if not body.over_reason.strip():
             raise HTTPException(409, "超出订量（客户可能拒收）：" + "；".join(over) + "。确需超发请填写原因")
         _add_exc(db, so, u, "超订量发货", body.over_reason)
-    sh = Shipment(code=_code(db, Shipment, "SH"), order_id=so.id, lines=shipped_rows, posting_id=p.id, shipped_by=u.id, note=body.note)
+    if hist:
+        _add_exc(db, so, u, "历史补录送货（不扣库存）", body.historical_reason)
+    sh = Shipment(code=_code(db, Shipment, "SH"), order_id=so.id, lines=shipped_rows, posting_id=p.id, shipped_by=u.id, note=body.note,
+                  delivery_no=body.delivery_no.strip(), shipped_on=shipped_on, inventory_effect="historical" if hist else "issued")
     db.add(sh)
     db.flush()
     for b in db.query(Box).filter(Box.id.in_([bid for r in shipped_rows for bid in r.get("boxes", [])])):
         b.shipment_id = sh.id
     p.source_type, p.source_id, p.note = "order", so.po_no, f"{so.code} {sh.code} {db.get(Customer, so.customer_id).name}"
-    complete = all((l.qty_shipped >= l.qty_ordered * (1 - CATCH_TOLERANCE) - 1e-6) if l.catch_weight else (l.qty_shipped >= l.qty_ordered - 1e-6)
-                   for l in lines.values())
-    so.status = "shipped" if complete else "partial"
+    db.flush()
+    ff.recompute_order_status(db, so)
     so.version += 1
     so.updated_at = _now()
     audit(db, u, "order.shipped", "so", so.id, shipment=sh.code, posting=p.id)
@@ -658,22 +743,32 @@ class RejectLine(BaseModel):
 
 class DeliverIn(BaseModel):
     rejected: list[RejectLine] = []
-    exception_reason: str = ""  # 没有签收单时
+    exception_reason: str = ""      # 确实永远拿不到签收单时（例外，留标签）
+    delivered_on: str | None = None # 实际送达日期（默认今天）
+    received_by: str = ""           # 客户签收人 / 签收情况
+    pod_pending: bool = False       # 客户已签收，签收单原件待补（不算“已核验”）
 
 
 @router.post("/shipments/{sid}/deliver")
 def deliver(sid: str, body: DeliverIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """确认本次送货完成：只改这一张送货单（和 PO 的累计签收数），不动库存（发货时已扣过），不要求 PO 全部发完。重复确认不会有任何变化。"""
     require(u, "order.ship")
     sh = get_or_404(db, Shipment, sid)
     so = db.get(SalesOrder, sh.order_id)
-    if sh.status == "delivered":
-        raise HTTPException(409, "已登记送达")
+    if sh.status in ("delivered", "discrepancy"):
+        return {**order_out(db, so, u), "already_delivered": True}
+    if sh.status == "cancelled":
+        raise HTTPException(409, "送货单已取消")
     pod = db.query(EvidenceLink).filter(EvidenceLink.target_type == "shipment", EvidenceLink.target_id == sh.id, EvidenceLink.active,
                                         EvidenceLink.purpose.in_(POD_PURPOSES)).count()
-    if not pod:
+    if not pod and not body.pod_pending:
         if not body.exception_reason.strip():
-            raise HTTPException(409, "请上传签收单（POD）或送货照片；确实没有时填写例外原因")
+            raise HTTPException(409, "请上传签收单（POD）或送货照片；客户已签收但原件还没拿到，勾选「原件待补」；确实没有时填写例外原因")
         _add_exc(db, so, u, f"{sh.code} 无签收依据", body.exception_reason)
+    if not pod and body.pod_pending and not body.received_by.strip():
+        raise HTTPException(400, "原件待补时请写签收情况（谁签收的 / 怎么确认的）")
+    if not pod and body.pod_pending:
+        notify(db, u.id, f"{sh.code} 签收单原件待补", f"/orders?so={so.id}", dedup_key=f"podpending:{sh.id}")
     lines = {l.id: l for l in db.query(SOLine).filter_by(order_id=so.id)}
     issues = []
     for r in body.rejected:
@@ -685,7 +780,9 @@ def deliver(sid: str, body: DeliverIn, u: User = Depends(current_user), db: Sess
         l.qty_rejected += r.qty
         l.reject_reason = (l.reject_reason + "；" if l.reject_reason else "") + r.reason
         issues.append(f"第 {l.line_no} 行「{l.description}」拒收 {r.qty} {l.order_unit}：{r.reason}")
-    sh.status, sh.delivered_by, sh.delivered_at = "delivered", u.id, _now()
+    sh.status, sh.delivered_by, sh.delivered_at = ("discrepancy" if issues else "delivered"), u.id, _now()
+    sh.delivered_on = (body.delivered_on or today().isoformat())[:10]
+    sh.received_by, sh.pod_pending = body.received_by.strip(), bool(body.pod_pending and not pod)
     if issues:
         t = Task(title=f"客户拒收/差异：{so.code} PO {so.po_no}", kind="exception", source="order", requires_evidence=True,
                  description="；".join(issues) + "。退回的货请在库存做「收货」（来源选其他：退货）或报废。", owner_id=so.created_by,
@@ -693,11 +790,11 @@ def deliver(sid: str, body: DeliverIn, u: User = Depends(current_user), db: Sess
         db.add(t)
         db.flush()
         notify(db, so.created_by, t.title, f"/t/{t.id}")
-    open_ship = db.query(Shipment).filter(Shipment.order_id == so.id, Shipment.status != "delivered", Shipment.id != sh.id).count()
-    if so.status == "shipped" and not open_ship:
-        so.status = "delivered"
+    db.flush()
+    ff.recompute_order_status(db, so)
     so.version += 1
-    audit(db, u, "order.delivered", "so", so.id, shipment=sh.code, rejected=len(issues))
+    audit(db, u, "order.delivered", "so", so.id, shipment=sh.code, rejected=len(issues), delivered_on=sh.delivered_on,
+          pod="pending_upload" if sh.pod_pending else ("attached" if pod else "exception"))
     db.commit()
     return order_out(db, so, u)
 
@@ -713,14 +810,99 @@ def close(oid: str, body: ReasonIn, u: User = Depends(current_user), db: Session
     so = get_or_404(db, SalesOrder, oid)
     if so.status in ("closed", "cancelled"):
         raise HTTPException(409, "订单已结束")
-    if not body.reason.strip():
-        raise HTTPException(400, "需填写原因")
-    so.status = "closed"
-    so.note = (so.note + "\n" if so.note else "") + f"结案：{body.reason}"
+    return set_balance(oid, BalanceIn(disposition="waived", reason=body.reason), u, db)
+
+
+class BalanceIn(BaseModel):
+    disposition: str            # awaiting_new_po | backordered | cancelled_by_customer | waived | ""（撤销，恢复为欠着）
+    reason: str = ""
+    customer_ref: str = ""      # 客户确认依据：邮件、电话、新 PO 号
+    line_ids: list[str] = []    # 空 = 所有还有剩余的行
+
+
+@router.post("/{oid}/balance")
+def set_balance(oid: str, body: BalanceIn, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """处置 PO 未履约的部分（只能由人操作）。原始订量、金额、已送部分和签收凭证都不变。"""
+    require(u, "order.manage")
+    so = get_or_404(db, SalesOrder, oid)
+    if so.status == "cancelled":
+        raise HTTPException(409, "订单已取消")
+    if body.disposition and body.disposition not in ff.BALANCE:
+        raise HTTPException(400, "处置方式需为 等客户新 PO / 补货中 / 客户取消 / 同意关闭")
+    if body.disposition and not body.reason.strip():
+        raise HTTPException(400, "请写处理原因")
+    lines = db.query(SOLine).filter_by(order_id=so.id).order_by(SOLine.line_no).all()
+    pick = [l for l in lines if (not body.line_ids or l.id in body.line_ids)]
+    changed = []
+    for l in pick:
+        open_qty = ff.q4(max(ff.D(l.qty_ordered) - ff.D(l.qty_shipped), 0))
+        if open_qty <= 1e-9 or ff.shipped_full(l):
+            continue
+        before = {"balance_status": l.balance_status, "qty_closed": l.qty_closed}
+        if not body.disposition:
+            l.balance_status, l.qty_closed, l.balance_reason, l.balance_ref = "", 0, "", ""
+        else:
+            l.balance_status = body.disposition
+            l.qty_closed = open_qty if ff.BALANCE[body.disposition][1] else 0
+            l.balance_reason, l.balance_ref = body.reason.strip(), body.customer_ref.strip()
+        l.balance_by, l.balance_at = u.id, _now()
+        changed.append({"line": l.line_no, "item": l.item_no or l.description, "open_qty": open_qty, "before": before,
+                        "after": {"balance_status": l.balance_status, "qty_closed": l.qty_closed}})
+    if not changed:
+        raise HTTPException(409, "没有可处置的未履约数量")
+    db.flush()
+    ff.recompute_order_status(db, so)
     so.version += 1
-    audit(db, u, "order.closed", "so", so.id, reason=body.reason)
+    so.updated_at = _now()
+    audit(db, u, "order.balance", "so", so.id, disposition=body.disposition or "reopen", reason=body.reason, customer_ref=body.customer_ref, lines=changed)
     db.commit()
     return order_out(db, so, u)
+
+
+class ShipmentPatch(BaseModel):
+    delivery_no: str | None = None
+    shipped_on: str | None = None
+    delivered_on: str | None = None
+    received_by: str | None = None
+    note: str | None = None
+    reason: str = ""
+
+
+@router.patch("/shipments/{sid}")
+def patch_shipment(sid: str, body: ShipmentPatch, u: User = Depends(current_user), db: Session = Depends(get_db)):
+    """更正送货单的业务信息（如补录的历史送货实际是 11/4 发、11/4 送达）。系统录入时间保留，库存不动。"""
+    require(u, "order.ship")
+    from ..models import InventoryPosting
+    sh = get_or_404(db, Shipment, sid)
+    keys = ("delivery_no", "shipped_on", "delivered_on", "received_by", "note")
+    before = {k: getattr(sh, k) for k in keys}
+    for k in keys:
+        v = getattr(body, k)
+        if v is None:
+            continue
+        v = v.strip()
+        if k in ("shipped_on", "delivered_on") and v:
+            try:
+                datetime.fromisoformat(v[:10])
+            except ValueError:
+                raise HTTPException(400, "日期请用 YYYY-MM-DD")
+            v = v[:10]
+        if k == "delivered_on" and v and sh.status == "shipped":
+            raise HTTPException(409, "还没确认送达，请用「确认本次送货完成」")
+        setattr(sh, k, v or (None if k in ("shipped_on", "delivered_on") else ""))
+    if sh.shipped_on and sh.delivered_on and sh.delivered_on < sh.shipped_on:
+        raise HTTPException(400, "送达日期不能早于发货日期")
+    if sh.posting_id and body.shipped_on:
+        p = db.get(InventoryPosting, sh.posting_id)
+        if p:
+            p.effective_at = sh.shipped_on
+    after = {k: getattr(sh, k) for k in keys}
+    diff = {k: [before[k], after[k]] for k in keys if before[k] != after[k]}
+    if not diff:
+        return order_out(db, db.get(SalesOrder, sh.order_id), u)
+    audit(db, u, "shipment.corrected", "shipment", sh.id, changes=diff, reason=body.reason or None)
+    db.commit()
+    return order_out(db, db.get(SalesOrder, sh.order_id), u)
 
 
 @router.post("/{oid}/cancel")

@@ -27,6 +27,13 @@ def _ensure_columns():
                                    ("expected_yield_pct", "FLOAT"), ("loss_reason", "VARCHAR(300) NOT NULL DEFAULT ''"),
                                    ("boxes", "INTEGER NOT NULL DEFAULT 0")],
             "customers": [("accounting_name", "VARCHAR(200) NOT NULL DEFAULT ''")],
+            "inventory_postings": [("effective_at", "VARCHAR(10)")],
+            "so_lines": [("qty_closed", "FLOAT NOT NULL DEFAULT 0"), ("balance_status", "VARCHAR(30) NOT NULL DEFAULT ''"),
+                         ("balance_reason", "VARCHAR(500) NOT NULL DEFAULT ''"), ("balance_ref", "VARCHAR(300) NOT NULL DEFAULT ''"),
+                         ("balance_by", "VARCHAR(32)"), ("balance_at", "DATETIME")],
+            "shipments": [("delivery_no", "VARCHAR(60) NOT NULL DEFAULT ''"), ("shipped_on", "VARCHAR(10)"), ("delivered_on", "VARCHAR(10)"),
+                          ("received_by", "VARCHAR(100) NOT NULL DEFAULT ''"), ("pod_pending", "BOOLEAN NOT NULL DEFAULT 0"),
+                          ("inventory_effect", "VARCHAR(24) NOT NULL DEFAULT 'issued'")],
             "purchase_orders": [("doc_type", "VARCHAR(16) NOT NULL DEFAULT 'invoice'"), ("exceptions", "JSON NOT NULL DEFAULT '[]'"),
                                 ("quick", "BOOLEAN NOT NULL DEFAULT 0"), ("purchase_date", "VARCHAR(10)"),
                                 ("payment_method", "VARCHAR(20) NOT NULL DEFAULT ''"), ("paid_by", "VARCHAR(100) NOT NULL DEFAULT ''")]}
