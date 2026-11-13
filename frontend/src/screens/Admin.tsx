@@ -8,6 +8,7 @@ import { Badge, Field, Modal, errMsg, useLoad, useToast } from '../components/ui
 import { FTYPE_LABEL } from '../components/FieldInput'
 import { AgentSettings } from './Agent'
 import { ResetDemo } from './Batches'
+import { RepairInventory } from './RepairInventory'
 
 // ---------- record types & fields ----------
 function FieldRow({ f, onChanged, startEditing }: { f: any; onChanged: () => void; startEditing?: boolean }) {
@@ -193,6 +194,7 @@ export function Users() {
           </div>
         ))}
       </div>
+      <RepairInventory />
       <ResetDemo />
       <Modal open={!!f} onClose={() => setF(null)} title={f?.id ? '编辑用户' : '新用户'} footer={<button className="btn-primary" onClick={save}>保存</button>}>
         {f && <div className="grid gap-3 sm:grid-cols-2">

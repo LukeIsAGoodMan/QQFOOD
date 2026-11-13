@@ -868,6 +868,7 @@ def apply(bid: str, body: ApplyIn, u: User = Depends(current_user), db: Session 
             except Dup:
                 skipped.append(i)
                 continue
+            p.effective_at = str((b.meta or {}).get("as_of") or "")[:10] or None  # 盘点数据日期（业务日期）
             on, unv = balance(db, sku.id, w.id, "on_hand", lot_id), balance(db, sku.id, w.id, "unverified", lot_id)
             if r.get("counted", True) is not False:
                 txn(db, p, sku.id, w.id, "unverified", -unv, lot_id)

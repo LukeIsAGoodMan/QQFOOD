@@ -735,12 +735,12 @@ def propose_order(ctx, db, lines, source_summary, po_no="", customer=None, site=
     return out
 
 
-@tool("list_orders", "客户订单列表", "列出客户订单：PO 号、送货点、要求交货日期、状态（待发货/部分发货/已发货/已送达）、是否逾期或明天到期、金额、未配对行数。",
+@tool("list_orders", "客户订单列表", "列出客户订单：PO 号、送货点、要求交货日期、PO 履约状态（未履约 / 部分履约 / 已全部履约 / 余额已处置结案）与最近一次送货状态（两者分开）、是否逾期、金额（原 PO / 已发 / 已签收 / 还欠）、未配对行数。",
       {"open_only": {"type": "boolean", "description": "只看未发完的（默认 true）"}, "status": {"type": "string"}})
 def list_orders(ctx, db, open_only=True, status=None):
     rows = ord_r.list_orders(status, open_only and not status, ctx.user, db)
-    return {"count": len(rows), "orders": [{k: r[k] for k in ("code", "po_no", "customer", "site", "required_date", "status_label", "overdue",
-                                                              "due_soon", "total", "shipped_amount", "unmapped")} | {"url": ctx.link(f"/orders?so={r['id']}")}
+    return {"count": len(rows), "orders": [{k: r[k] for k in ("code", "po_no", "customer", "site", "required_date", "po_status_label", "latest_delivery", "overdue",
+                                                              "due_soon", "total", "shipped_amount", "delivered_amount", "remaining_amount", "unmapped")} | {"url": ctx.link(f"/orders?so={r['id']}")}
                                            for r in rows[:50]]}
 
 
@@ -759,7 +759,9 @@ def get_order(ctx, db, order):
         if "boxes_in_stock" in l:
             l["boxes_in_stock"] = {"count": len(l["boxes_in_stock"]), "total_weight": round(sum(b["weight"] for b in l["boxes_in_stock"]), 2)}
     d["url"] = ctx.link(f"/orders?so={so.id}")
-    d["note_for_ai"] = "发货、送达登记需要在工作台完成（称重扫箱、签收单）。改交期可用 propose_change(target_type='so')。"
+    d["note_for_ai"] = ("客户 PO 履约（po_status）和我们每一趟送货（shipments[].status）是两回事：PO 只送了一部分，已签收的送货单照样是完成。"
+                        "发货、确认送货完成、处理未履约余额（等新 PO / 补货中 / 客户取消 / 同意关闭）都要用户在工作台操作；不要替用户说“已送达”或“已结案”。"
+                        "签收单原件待补的（pod_status=to_upload）提醒用户补传。改交期可用 propose_change(target_type='so')。")
     return d
 
 

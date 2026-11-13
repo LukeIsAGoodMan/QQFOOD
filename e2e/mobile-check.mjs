@@ -482,10 +482,14 @@ let exceptionTaskId
   await checkLayout(page, '发货单')
   await shot(page, 'ord-05-slip')
   await page.locator('div[role=dialog]').last().locator('button[aria-label="关闭"]').tap(); await page.waitForTimeout(300)
-  await page.locator('div[role=dialog] button', { hasText: '登记送达' }).tap(); await page.waitForTimeout(500)
-  await page.locator('div[role=dialog]').last().locator('input[placeholder^="没有签收单"], label:has-text("没有签收单") input').first().fill('司机在门店拍照，签收单稍后补')
-  await page.locator('div[role=dialog]').last().locator('button', { hasText: '确认送达' }).tap(); await page.waitForTimeout(900)
-  ok('手机登记送达（例外：签收单后补）', (await api(page, `/api/orders/${ckOrder.id}`)).status === 'delivered')
+  await page.locator('div[role=dialog] button', { hasText: '确认本次送货完成' }).first().tap(); await page.waitForTimeout(500)
+  const dd = page.locator('div[role=dialog]').last()
+  await dd.locator('label:has-text("签收人") input').fill('中央厨房收货员签字')
+  await dd.locator('label', { hasText: '原件待补' }).locator('input[type=checkbox]').check()
+  await checkLayout(page, '确认本次送货完成')
+  await dd.locator('button', { hasText: '确认本次送货完成' }).last().tap(); await page.waitForTimeout(900)
+  const dlv = await api(page, `/api/orders/${ckOrder.id}`)
+  ok('手机确认送货完成（签收单原件待补，不算已核验）', dlv.status === 'delivered' && dlv.shipments[0].pod_status === 'to_upload', dlv.shipments[0].pod_label)
   await page.context().close()
 }
 
@@ -724,6 +728,57 @@ let exceptionTaskId
   const pos = await api(page, '/api/purchasing/pos')
   const po = (pos.rows || pos.items || pos).find((x) => x.supplier === 'Costco')
   ok('生成已收货的采购记录', !!po && po.status === 'received')
+  await page.context().close()
+}
+
+// ---------- 19. PO 部分履约：只送了一部分，本次送货照样「已签收完成」；剩余由人处置（等客户新 PO），原 PO 金额不变 ----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => (await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined })).json(), [path, body, method])
+  const m0 = await api(page, '/api/inv/master')
+  const w = m0.warehouses.find((x) => x.code === 'WH597').id
+  const a = await call('/api/inv/skus', { name: '示例 卤水料包', category: '干货', base_unit: '箱', conversions: { '包': 20 } })
+  const b = await call('/api/inv/skus', { name: '示例 辣豆瓣酱', category: '干货', base_unit: '箱' })
+  await call('/api/inv/receive', { idempotency_key: 'e2e-ful-' + Date.now(), sku_id: a.id, warehouse_id: w, qty: 84, lot_code: '2602' })
+  const tnt = (await api(page, '/api/orders/customers')).find((c) => c.code === 'TNT')
+  const so = await call('/api/orders', { customer_id: tnt.id, site_id: tnt.sites[0].id, po_no: 'E2E-623030105', required_date: '2026-11-04', lines: [
+    { item_no: 'E774413', description: 'Marinated Soup Base', qty: 6, price: 150, sku_id: a.id, factor: 0.5 },
+    { item_no: 'E505078', description: 'Chili Bean Sauce', qty: 6, price: 125, sku_id: b.id }] })
+  const o0 = await api(page, `/api/orders/${so.id}`)
+  await call(`/api/orders/${so.id}/ship`, { idempotency_key: 'e2e-ship-' + Date.now(), delivery_no: 'QQUSA-E2E', shipped_on: '2026-11-04', lines: [{ line_id: o0.lines[0].id, qty: 6 }] })
+  const stockA = (await api(page, '/api/inv/stock')).rows.filter((r) => r.sku_id === a.id).reduce((t, r) => t + r.on_hand, 0)
+  ok('6 个大统华单位只扣 3 箱（84 → 81）', stockA === 81, String(stockA))
+  await page.goto(`${BASE}/orders?so=${so.id}`); await page.waitForTimeout(1200)
+  ok('订单详情：PO 部分履约 + 最近送货已发出', await page.locator('div[role=dialog] >> text=PO 部分履约').count() > 0 && await page.locator('[aria-label="PO 履约汇总"]').count() === 1)
+  await page.locator('div[role=dialog] button', { hasText: '确认本次送货完成' }).first().tap(); await page.waitForTimeout(500)
+  const dd = page.locator('div[role=dialog]').last()
+  await dd.locator('label:has-text("签收人") input').fill('门店收货员签字')
+  await dd.locator('label', { hasText: '原件待补' }).locator('input[type=checkbox]').check()
+  await dd.locator('button', { hasText: '确认本次送货完成' }).last().tap(); await page.waitForTimeout(1000)
+  const o1 = await api(page, `/api/orders/${so.id}`)
+  ok('PO 没发完，本次送货照样「已签收完成」', o1.shipments[0].status === 'delivered' && o1.po_status === 'partial' && o1.remaining_amount === 750, `${o1.po_status} ${o1.remaining_amount}`)
+  await checkLayout(page, 'PO 部分履约（订单详情）')
+  await shot(page, 'ful-01-partial')
+  await page.locator('div[role=dialog] button', { hasText: '处理未履约余额' }).tap(); await page.waitForTimeout(500)
+  const bd = page.locator('div[role=dialog]').last()
+  await bd.locator('button', { hasText: '等客户新 PO' }).tap()
+  await bd.locator('label:has-text("原因") input').fill('T&T 要求剩余商品重新开 PO')
+  await checkLayout(page, '处理未履约余额')
+  await shot(page, 'ful-02-balance')
+  await bd.locator('button', { hasText: '确认' }).last().tap(); await page.waitForTimeout(1000)
+  const o2 = await api(page, `/api/orders/${so.id}`)
+  ok('剩余标「等客户新 PO」：PO 结案、原金额不变、送货单仍完成', o2.po_status === 'closed_balance' && o2.total === 1650 && o2.shipments[0].status === 'delivered' && !o2.overdue)
+  await page.context().close()
+}
+
+// ---------- 20. 历史补录误扣库存：系统管理里先预览（只读），确认后才修复 ----------
+{
+  const page = await login('admin')
+  await page.goto(`${BASE}/admin/users`); await page.waitForTimeout(1200)
+  await page.locator('button', { hasText: '预览' }).last().tap(); await page.waitForTimeout(1200)
+  ok('库存核对预览可打开（只读）', await page.locator('div[role=dialog] >> text=历史补录送货 · 库存核对').count() > 0 && await page.locator('div[role=dialog] button', { hasText: '执行修复' }).isDisabled())
+  await checkLayout(page, '历史补录库存核对')
+  await shot(page, 'ful-03-repair')
   await page.context().close()
 }
 

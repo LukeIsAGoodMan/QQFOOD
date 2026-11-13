@@ -306,6 +306,7 @@ class InventoryPosting(Base):
     note: Mapped[str] = mapped_column(String(1000), default="")
     reverses_posting_id: Mapped[str | None] = mapped_column(String(32))
     reversed_by_posting_id: Mapped[str | None] = mapped_column(String(32))
+    effective_at: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 业务日期（如历史送货 11/4）；created_at 是系统录入时间
     created_by: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = TS()
 
@@ -796,6 +797,14 @@ class SOLine(Base):
     boxes_shipped: Mapped[int] = mapped_column(Integer, default=0)
     qty_rejected: Mapped[float] = mapped_column(Float, default=0)
     reject_reason: Mapped[str] = mapped_column(String(300), default="")
+    # 未履约余额（PO 剩下没发的部分）由人处置，系统不自动关闭：
+    # awaiting_new_po 等客户新 PO（旧 PO 余额关闭）| backordered 补货中（仍欠）| cancelled_by_customer 客户取消 | waived 同意关闭
+    qty_closed: Mapped[float] = mapped_column(Float, default=0)
+    balance_status: Mapped[str] = mapped_column(String(30), default="")
+    balance_reason: Mapped[str] = mapped_column(String(500), default="")
+    balance_ref: Mapped[str] = mapped_column(String(300), default="")  # 客户确认依据（邮件 / 电话 / 新 PO 号）
+    balance_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    balance_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Shipment(Base):
@@ -803,7 +812,7 @@ class Shipment(Base):
     id: Mapped[str] = _id("sh")
     code: Mapped[str] = mapped_column(String(40), unique=True)
     order_id: Mapped[str] = mapped_column(ForeignKey("sales_orders.id"), index=True)
-    status: Mapped[str] = mapped_column(String(16), default="shipped")  # shipped delivered
+    status: Mapped[str] = mapped_column(String(16), default="shipped")  # shipped 已发出 | delivered 已签收完成 | discrepancy 签收有差异 | cancelled
     lines: Mapped[list] = mapped_column(JSON)  # [{line_id, qty, weight, boxes:[box ids], picks:[{lot_id, qty}]}]
     posting_id: Mapped[str | None] = mapped_column(String(32))
     shipped_by: Mapped[str] = mapped_column(String(32))
@@ -811,6 +820,13 @@ class Shipment(Base):
     delivered_by: Mapped[str | None] = mapped_column(String(32))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     note: Mapped[str] = mapped_column(String(1000), default="")
+    delivery_no: Mapped[str] = mapped_column(String(60), default="")       # 我们的送货单号（如 QQUSA20261108）
+    shipped_on: Mapped[str | None] = mapped_column(String(10), nullable=True)    # 实际发货日期（业务日期）；shipped_at 是系统录入时间
+    delivered_on: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 实际送达日期
+    received_by: Mapped[str] = mapped_column(String(100), default="")     # 客户签收人 / 签收情况
+    pod_pending: Mapped[bool] = mapped_column(Boolean, default=False)     # 已签收但原件待补（不是“已核验”）
+    # issued 发货时已扣库存 | historical 历史补录、库存已在盘点里体现（不扣）| reversed_historical 补录时误扣、已冲销
+    inventory_effect: Mapped[str] = mapped_column(String(24), default="issued")
 
 
 class Box(Base):

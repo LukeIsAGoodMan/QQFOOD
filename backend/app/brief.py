@@ -33,9 +33,12 @@ def build(db: Session, u: User) -> dict:
     def so_row(o):
         return {"code": o.code, "po": o.po_no or "PO 待补", "customer": custs[o.customer_id].name if o.customer_id in custs else "",
                 "site": sites[o.site_id].name if o.site_id in sites else "", "required_date": o.required_date,
-                "status": {"confirmed": "待发货", "partial": "部分发货"}.get(o.status, o.status), "link": f"/orders?so={o.id}"}
+                "status": {"confirmed": "待发货", "partial": "部分履约"}.get(o.status, o.status), "link": f"/orders?so={o.id}"}
 
-    open_so = db.query(SalesOrder).filter(SalesOrder.status.in_(OPEN_SO)).order_by(SalesOrder.required_date).all()
+    from . import fulfillment as ff
+    from .models import SOLine
+    open_so = [o for o in db.query(SalesOrder).filter(SalesOrder.status.in_(OPEN_SO)).order_by(SalesOrder.required_date)
+               if any(ff.owes(l) and l.balance_status != "backordered" for l in db.query(SOLine).filter_by(order_id=o.id))]
     due = [so_row(o) for o in open_so if o.required_date in (today, tomorrow)]
     late = [so_row(o) for o in open_so if o.required_date and o.required_date < today]
     po_late = [{"code": p.code, "supplier": p.supplier, "expected_date": p.expected_date, "link": f"/purchasing?po={p.id}"}
@@ -60,7 +63,7 @@ def build(db: Session, u: User) -> dict:
 
     sections = [
         {"key": "orders_due", "title": "今天 / 明天要交的单", "tone": "warn", "items": due},
-        {"key": "orders_late", "title": "过了交货日还没发完", "tone": "bad", "items": late},
+        {"key": "orders_late", "title": "过了交货日、还有没处理的剩余", "tone": "bad", "items": late},
         {"key": "batches", "title": "ChatGPT 提交、等你确认", "tone": "warn", "items": pend},
         {"key": "low_stock", "title": "低于安全库存", "tone": "bad", "items": low},
         {"key": "expiring", "title": "14 天内到期的 Lot", "tone": "warn", "items": exp},
