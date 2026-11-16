@@ -782,6 +782,36 @@ let exceptionTaskId
   await page.context().close()
 }
 
+// ---------- 21. 历史业务补录：一张 Costco 小票混合明细（插头只记金额、手套补记库存），手机上看库存影响后确认 ----------
+{
+  const page = await login('admin')
+  const call = (path, body, method = 'POST') => page.evaluate(async ([p, b, m]) => { const r = await fetch(p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qq_token') }, body: b ? JSON.stringify(b) : undefined }); return { status: r.status, body: await r.json() } }, [path, body, method])
+  await page.goto(`${BASE}/backfill`); await page.waitForTimeout(900)
+  ok('补录列表（老板 / 管理员）', await page.locator('h1', { hasText: '历史业务补录' }).count() === 1)
+  await page.locator('button', { hasText: '新建补录' }).tap(); await page.waitForTimeout(700)
+  await checkLayout(page, '新建补录（表单）')
+  await shot(page, 'hb-01-new')
+  await page.keyboard.press('Escape')
+  const rec = (await call('/api/backfill', { kind: 'purchase_receipt', business_date: '2026-11-08', supplier: 'Costco', doc_no: 'E2E-HB-' + Date.now(), payment_method: 'personal', paid_by: '老板',
+    total_amount: 64, reason: '补 Costco 小票', lines: [
+      { name: '插头', item_type: '维修材料', qty: 2, amount: 19 },
+      { name: '示例 一次性手套', item_type: '生产用品', qty: 3, unit: '盒', amount: 45, new_sku: { base_unit: '盒' }, inventory: 'post' }] })).body
+  await page.goto(`${BASE}/backfill/${rec.id}`); await page.waitForTimeout(1200)
+  ok('补录详情：每行库存影响（0 → 3）', await page.locator('[aria-label="库存影响预览"] >> text=0 → 3').count() > 0)
+  await checkLayout(page, '补录详情（确认前）')
+  await shot(page, 'hb-02-preview')
+  await page.locator('button', { hasText: '确认补录' }).tap(); await page.waitForTimeout(1200)
+  const after = (await call(`/api/backfill/${rec.id}`, null, 'GET')).body
+  ok('手机确认补录：手套入库 3、插头只记金额', after.status === 'confirmed' && after.posted.length === 1 && after.posted[0].qty === 3, JSON.stringify(after.posted))
+  await checkLayout(page, '补录详情（已确认）')
+  await shot(page, 'hb-03-confirmed')
+  await page.context().close()
+  const op = await login('ops')
+  const r = await op.evaluate(async () => (await fetch('/api/backfill', { headers: { Authorization: 'Bearer ' + localStorage.getItem('qq_token') } })).status)
+  ok('运营主管不能用历史补录（403）', r === 403, String(r))
+  await op.context().close()
+}
+
 await browser.close()
 const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} 通过；页面脚本错误 ${pageErrors.length} 个；截图在 e2e/screenshots/`)

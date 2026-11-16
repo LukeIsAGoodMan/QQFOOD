@@ -11,7 +11,7 @@ from .db import Base, engine
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 from .agent import oauth as agent_oauth, server as agent_server
-from .routers import brief as brief_r
+from .routers import backfill as backfill_r, brief as brief_r
 from .routers import admin, aliases, auth, batches, evidence, ingest, inventory, metrics, notebook, orders, pages, production, purchasing, records, tasks
 
 def _ensure_columns():
@@ -93,7 +93,7 @@ app = FastAPI(title="QQ Food 597 运营管理系统", version="0.3.0", lifespan=
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
-for r in (brief_r, auth, pages, records, tasks, evidence, inventory, aliases, purchasing, orders, production, batches, admin, notebook, ingest, metrics, agent_oauth, agent_server):
+for r in (brief_r, backfill_r, auth, pages, records, tasks, evidence, inventory, aliases, purchasing, orders, production, batches, admin, notebook, ingest, metrics, agent_oauth, agent_server):
     app.include_router(r.router)
 
 
