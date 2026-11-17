@@ -853,3 +853,45 @@ class Recipe(Base):
     note: Mapped[str] = mapped_column(String(500), default="")
     updated_by: Mapped[str | None] = mapped_column(String(32))
     updated_at: Mapped[datetime] = TS()
+
+
+# ---------- 历史业务补录（只有老板 / 系统管理员） ----------
+class HistoricalBackfill(Base):
+    """补一张以前发生、系统里没记全的单据：采购小票 / 采购单 / 收货 / 调拨 / 生产领料耗用 / 销售交付 / 费用。
+    每行单独选：只补单据（库存已入账或属于费用）/ 补记库存变动。确认才生效；已记库存的修改、作废都走冲销 / 差额流水。"""
+    __tablename__ = "historical_backfills"
+    id: Mapped[str] = _id("hb")
+    code: Mapped[str] = mapped_column(String(40), unique=True)
+    kind: Mapped[str] = mapped_column(String(24))  # purchase_receipt purchase_order receiving transfer production_use sales_delivery expense
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft confirmed voided
+    business_date: Mapped[str] = mapped_column(String(10))
+    supplier: Mapped[str] = mapped_column(String(200), default="")
+    doc_no: Mapped[str] = mapped_column(String(100), default="")        # 小票号 / 采购单号 / BOL / 送货单号
+    container_no: Mapped[str] = mapped_column(String(60), default="")   # 柜号，如 2602
+    goods_status: Mapped[str] = mapped_column(String(16), default="arrived")  # arrived 已到货 | in_transit 在途 / 未到货
+    warehouse_id: Mapped[str | None] = mapped_column(String(32), nullable=True)       # 收货 / 耗用 / 交付的仓库（默认 597）
+    from_warehouse_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # 调拨：从哪来
+    payment_method: Mapped[str] = mapped_column(String(20), default="")
+    paid_by: Mapped[str] = mapped_column(String(100), default="")
+    total_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str] = mapped_column(String(1000), default="")       # 补录原因（必填）
+    note: Mapped[str] = mapped_column(String(2000), default="")
+    links: Mapped[list] = mapped_column(JSON, default=list)   # 关联已有记录 [{type, id, label}]
+    lines: Mapped[list] = mapped_column(JSON, default=list)   # 明细（见 backfill.py）
+    ledger: Mapped[list] = mapped_column(JSON, default=list)  # 已记的库存 [{rev, posting_id, line_id, sku_id, warehouse_id, lot_id, qty}]
+    pending: Mapped[dict] = mapped_column(JSON, default=dict) # ChatGPT 提出的修改 / 作废，等人在系统里确认
+    log: Mapped[list] = mapped_column(JSON, default=list)     # 完整修改日志 [{at, by, by_name, action, reason, changes}]
+    source: Mapped[str] = mapped_column(String(40), default="manual")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = TS()
+    updated_at: Mapped[datetime] = TS()
+    confirmed_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    voided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    void_reason: Mapped[str] = mapped_column(String(1000), default="")
+
+    @property
+    def title(self) -> str:
+        return f"{self.code} {self.supplier or self.doc_no or ''}".strip()

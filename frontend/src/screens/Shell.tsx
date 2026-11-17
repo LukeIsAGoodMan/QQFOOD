@@ -3,6 +3,7 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import {
   Bell, BookUser, Boxes, ClipboardCheck, Database, Factory, Gauge, Hammer, Home, Inbox, Kanban, LayoutDashboard, ListChecks,
   LogOut, Menu, ScrollText, Search, Settings, ShieldCheck, ShoppingCart, Table, Thermometer, Truck, Users as UsersIcon, Wrench, X, Car, UserPlus, FileText,
+  History,
 } from 'lucide-react'
 import { get, post } from '../lib/api'
 import { useAuth } from '../lib/auth'
@@ -31,7 +32,7 @@ function usePagesVersion() {
 }
 
 function Nav({ onNavigate }: { onNavigate?: () => void }) {
-  const { can } = useAuth()
+  const { can, me } = useAuth()
   const v = usePagesVersion()
   const { data: pages } = useLoad(() => get('/api/pages'), [v])
   const groups: Record<string, any[]> = {}
@@ -47,6 +48,7 @@ function Nav({ onNavigate }: { onNavigate?: () => void }) {
         {link('/', <Home size={18} />, t('nav.home'))}
         {link('/ingest', <Inbox size={18} />, t('nav.ingest'))}
         {link('/notebook', <BookUser size={18} />, t('nav.notebook'))}
+        {(me?.role === 'boss' || me?.role === 'sys_admin') && link('/backfill', <History size={18} />, '历史补录')}
       </div>
       {Object.entries(groups).map(([g, ps]) => (
         <div key={g}>

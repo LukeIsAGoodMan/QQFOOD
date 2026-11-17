@@ -172,15 +172,15 @@ def list_for_target(target_type: str, target_id: str, include_inactive: bool = F
 
 TARGET_LABEL = {"task": "任务", "record": "记录", "transfer": "调入单", "po": "采购单", "so": "订单", "shipment": "发货",
                 "batch": "批次", "production": "生产", "lot": "Lot", "posting": "入库", "contact": "联系人", "note": "笔记",
-                "checklist_run": "检查表", "ingest": "资料中心"}
+                "checklist_run": "检查表", "ingest": "资料中心", "backfill": "补录单"}
 
 
 def target_label(db: Session, ttype: str, tid: str) -> str:
     """证据挂在哪里（给人看的）：任务「2602柜入库凭证」、调入单 TR-…"""
-    from ..models import (BatchProposal, BusinessRecord, Lot, ProductionBatch, PurchaseOrder, SalesOrder, Shipment, Task,
-                          Transfer)
+    from ..models import (BatchProposal, BusinessRecord, HistoricalBackfill, Lot, ProductionBatch, PurchaseOrder, SalesOrder,
+                          Shipment, Task, Transfer)
     model = {"task": Task, "record": BusinessRecord, "transfer": Transfer, "po": PurchaseOrder, "so": SalesOrder, "shipment": Shipment,
-             "batch": BatchProposal, "production": ProductionBatch, "lot": Lot}.get(ttype)
+             "batch": BatchProposal, "production": ProductionBatch, "lot": Lot, "backfill": HistoricalBackfill}.get(ttype)
     obj = db.get(model, tid) if model else None
     name = (getattr(obj, "title", None) or getattr(obj, "code", None) or getattr(obj, "lot_code", None)) if obj else None
     return f"{TARGET_LABEL.get(ttype, ttype)}「{name}」" if name else TARGET_LABEL.get(ttype, ttype)

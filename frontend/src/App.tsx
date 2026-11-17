@@ -11,6 +11,7 @@ import { Notebook } from './screens/Notebook'
 import { Ingest } from './screens/Ingest'
 import { Audit, Me, Schema, Users } from './screens/Admin'
 import { UploadByLink } from './screens/Agent'
+import { BackfillDetail, BackfillList } from './screens/Backfill'
 
 function Routed() {
   const { me, loading } = useAuth()
@@ -32,6 +33,8 @@ function Routed() {
         <Route path="/evidence-review" element={<EvidenceReview />} />
         <Route path="/notebook" element={<Notebook />} />
         <Route path="/ingest" element={<Ingest />} />
+        <Route path="/backfill" element={<BackfillList />} />
+        <Route path="/backfill/:id" element={<BackfillDetail />} />
         <Route path="/quality" element={<PageByName match="质量" />} />
         <Route path="/inventory" element={<PageByName match="库存" />} />
         <Route path="/purchasing" element={<PageByName match="采购" />} />

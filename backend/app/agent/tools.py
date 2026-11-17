@@ -47,6 +47,8 @@ INSTRUCTIONS = (
     "之后用 list_missing_proof 查还缺原件的单据，用 request_upload_link 生成新链接补传；原件先传到了别处（如临时任务）的，单据建好后用 attach_existing_proof 挂过去。原件上传后仍需人核验。"
     "11) 采购小票：用户发来小票 / 收据照片说“录采购”时用 propose_purchase_receipt（不是 propose_stock_counts）。每行判断 usage：转卖 / 自用（腌制切配）/ 费用；"
     "同一种香料一部分自用一部分转卖时用 self_qty 拆，拿不准就问用户。"
+    "12) 历史业务补录（以前发生、系统没记全的单据）用 propose_historical_backfill，只有老板 / 系统管理员能用。先 list_historical_backfills 查有没有补过；"
+    "每行默认只补单据，只有确定库存从没记过才 post；采购、收货、生产耗用、销售交付分别补，不要因为销售已交付就认为原料已入账；拿不准就问用户。确认要用户在系统里点。"
 )
 
 
@@ -483,8 +485,8 @@ def verify_upload(token: str) -> dict:
 
 
 def _resolve_target(db, target_type, target_id) -> str:
-    from ..models import BatchProposal, Lot, ProductionBatch, PurchaseOrder, SalesOrder, Shipment, Transfer
-    model = {"task": Task, "record": BusinessRecord, "po": PurchaseOrder, "so": SalesOrder, "transfer": Transfer, "shipment": Shipment,
+    from ..models import BatchProposal, HistoricalBackfill, Lot, ProductionBatch, PurchaseOrder, SalesOrder, Shipment, Transfer
+    model = {"backfill": HistoricalBackfill, "task": Task, "record": BusinessRecord, "po": PurchaseOrder, "so": SalesOrder, "transfer": Transfer, "shipment": Shipment,
              "production": ProductionBatch, "batch": BatchProposal, "lot": Lot}[target_type]
     obj = db.get(model, target_id)
     if not obj and hasattr(model, "code"):
@@ -495,8 +497,8 @@ def _resolve_target(db, target_type, target_id) -> str:
 
 
 @tool("request_upload_link", "生成原件上传链接", "生成一个 30 分钟有效的手机上传链接，让用户把照片/PDF 原件直接上传到指定任务、记录或调拨单（作为证据，待核验）。",
-      {"target_type": {"type": "string", "enum": ["task", "record", "transfer", "po", "so", "shipment", "production", "batch", "lot"],
-                       "description": "batch=之前提交的批次（确认后自动挂到生成的调入单/订单）；shipment=发货记录（签收单）；production=生产记录；lot=批次标签"},
+      {"target_type": {"type": "string", "enum": ["task", "record", "transfer", "po", "so", "shipment", "production", "batch", "lot", "backfill"],
+                       "description": "backfill=历史补录单（HB-…，小票 / 单据原件）；batch=之前提交的批次（确认后自动挂到生成的调入单/订单）；shipment=发货记录（签收单）；production=生产记录；lot=批次标签"},
        "target_id": {"type": "string", "description": "id；采购单/订单/发货/生产/批次也可用单号（PO-…、SO-…、SH-…、PB-…、BT-…）"},
        "purpose": {"type": "string", "description": "用途，如 签收单、安装后照片、发票、付款证明、整改证明"}}, ["target_type", "target_id"], tier="write")
 def request_upload_link(ctx, db, target_type, target_id, purpose="附件"):
@@ -777,3 +779,111 @@ def get_production_plan(ctx, db):
                            "purchase_pack": m["sku"]["purchase_pack"], "suggest_cases": m["suggest_cases"], "suggest_qty": m["suggest_qty"],
                            "expected_leftover": m["expected_leftover"]} for m in d["materials"]],
             "url": ctx.link("/production"), "note": "配方/出成率与箱规在工作台「生产」页设置；生成采购单草稿也在那里一键完成。"}
+
+
+# ---------- 历史业务补录（只有老板 / 系统管理员；确认、改已确认单、作废已确认单都要人在系统里点） ----------
+_BF_LINE = ("每行：name 品名；sku（已有商品：品名 / 内部编号 / 大统华 Item#）或 new_sku {name, category, base_unit, usage, conversions}（没有才新建，同名会复用）；"
+            "item_type 食品原料 / 调料辅料 / 包材 / 生产用品 / 维修材料 / 设备 / 成品 / 费用；category 可空；qty、unit、factor（1 个 unit = 几个基本单位，主档没有换算时必填）；"
+            "unit_price / amount；lot_code、expiry；inventory：doc_only（默认，只补单据：库存已入账或是费用）/ post（库存确实没记，补记变动）；"
+            "direction（仅生产耗用：out 领料耗用 默认 / output 产出）；covered_by {type, id} 说明这行已由哪条记录入账。")
+
+
+def _bf_reply(ctx, db, rec, msg):
+    from .. import backfill as bf
+    d = bf.out(db, rec)
+    p = d.get("plan")
+    brief = None
+    if p:
+        brief = {"lines": [{"line": r["line_id"], "name": r["name"], "mode": "补记库存" if r["mode"] == "post" else "只补单据", "sku": r["sku"] or r["sku_note"],
+                            "convert": r["convert"], "stock_change": [f"{x['warehouse']} {x['before']:g} → {x['after']:g}" for x in r["deltas"]],
+                            "blockers": r["blockers"], "possibly_already_recorded": r["suspects"], "info": r["info"]} for r in p["lines"]],
+                 "possible_duplicate_documents": p["dups"], "warnings": p["warnings"] + p["blockers"]}
+    return {"code": d["code"], "status": d["status"], "kind": d["kind_label"], "version": d["version"], "preview": brief,
+            "pending_change": d["pending"] or None, "posted_stock": d["posted"], "confirm_url": ctx.link(f"/backfill/{d['id']}"),
+            "message": msg}
+
+
+def _bf_get(db, ref):
+    from ..models import HistoricalBackfill
+    r = db.get(HistoricalBackfill, ref) or db.query(HistoricalBackfill).filter_by(code=str(ref).strip().upper()).first()
+    if not r:
+        raise ToolError(f"找不到补录单 {ref}")
+    return r
+
+
+def _bf_payload(meta, lines):
+    m = dict(meta or {})
+    for k in ("warehouse", "from_warehouse"):
+        if m.get(k):
+            m[f"{k}_id"] = m.pop(k)
+    return {**m, "lines": [{**l, **({"sku_id": l.pop("sku")} if l.get("sku") else {})} for l in (lines or [])]}
+
+
+@tool("list_historical_backfills", "历史补录单", "列出历史业务补录单（只有老板 / 系统管理员能用）：编号、类型、业务日期、供应商、柜号、状态（draft 草稿 / confirmed 已确认 / voided 已作废）、"
+      "有没有待确认的修改。补录前先查，避免同一张小票 / 同一柜补两次。",
+      {"status": {"type": "string", "enum": ["draft", "confirmed", "voided"]}, "query": {"type": "string", "description": "单号 / 柜号 / 供应商 / 品名"}})
+def list_historical_backfills(ctx, db, status=None, query=""):
+    from ..routers import backfill as bfr
+    rows = bfr.list_(status, query or "", ctx.user, db)
+    return {"backfills": [{**{k: r[k] for k in ("code", "kind_label", "status", "business_date", "supplier", "doc_no", "container_no", "lines", "posted_lines", "pending")},
+                           "url": ctx.link(f"/backfill/{r['id']}")} for r in rows[:50]]}
+
+
+@tool("get_historical_backfill", "补录单详情", "按编号（HB-…）查看一张补录单：明细、每行库存处理、已记的库存、关联记录、待确认修改、完整修改日志。",
+      {"backfill": {"type": "string", "description": "HB-… 编号或 id"}}, ["backfill"])
+def get_historical_backfill(ctx, db, backfill):
+    from .. import backfill as bf
+    bf.require_admin(ctx.user)
+    rec = _bf_get(db, backfill)
+    d = _bf_reply(ctx, db, rec, "")
+    d["log"] = [{k: x[k] for k in ("at", "by_name", "action", "reason")} for x in rec.log or []]
+    d["links"] = [x["label"] for x in rec.links or []]
+    return d
+
+
+@tool("propose_historical_backfill", "提交历史业务补录（草稿）",
+      "把以前发生、系统里没记全的业务补成一张补录单草稿：采购小票、采购单、收货、调拨、生产领料 / 耗用、销售交付、费用（只有老板 / 系统管理员）。"
+      "草稿不改任何数据；返回每行的库存影响（变动前后数量）、疑似已记账、疑似重复单据。用户在 confirm_url 核对后点确认才生效。"
+      "规则：默认每行 doc_only（只补单据）。只有确定这笔库存从没记过才用 post；已到货并导入的柜（期初 / 盘点 / 调入已记）一律 doc_only；"
+      "未到货（goods_status=in_transit）不能加库存；采购单只是订货不能加库存（到货用 receiving）；销售已交付不代表原料采购、收货、生产耗用已补——分别补成不同的补录单，各自判断。"
+      "meta：kind（purchase_receipt / purchase_order / receiving / transfer / production_use / sales_delivery / expense）、business_date（YYYY-MM-DD）、reason（补录原因，必填）、"
+      "supplier、doc_no（小票号 / 单号 / BOL）、container_no（柜号）、goods_status（arrived / in_transit）、warehouse（仓库编码，默认 WH597）、from_warehouse（调拨来源，如 TOR / VAN / SUPREME）、"
+      "payment_method（公司卡 / 现金 / 个人垫付 / 支票 / 转账）、paid_by、total_amount、note、links（关联已有记录 [{type: order/shipment/po/transfer/production/batch/posting/backfill, id: 单号或 PO 号}]）。" + _BF_LINE,
+      {"meta": {"type": "object"}, "lines": {"type": "array", "minItems": 1, "maxItems": 200, "items": {"type": "object"}},
+       "source_summary": {"type": "string", "description": "依据，如 “Costco 11/8 小票照片”"}}, ["meta", "lines", "source_summary"], tier="propose")
+def propose_historical_backfill(ctx, db, meta, lines, source_summary):
+    from .. import backfill as bf
+    data = _bf_payload(meta, lines)
+    data["note"] = f"{data.get('note') or ''} 依据：{source_summary}".strip()
+    rec = bf.create(db, ctx.user, data, source=f"agent:{ctx.client}")
+    db.commit()
+    return _bf_reply(ctx, db, rec, "已存为补录草稿，尚未生效、没有改库存。请用户打开 confirm_url 核对每行的库存影响后确认；有 blockers 的行要先改。")
+
+
+@tool("propose_backfill_change", "修改 / 作废历史补录",
+      "修改或作废一张补录单（只有老板 / 系统管理员）。草稿：直接改 / 作废（草稿不影响库存）。已确认：只生成待确认的修改，用户在 confirm_url 看库存差额后确认；"
+      "已记库存的修改按差额、作废按冲销记新流水，旧流水不改。changes 可含 meta 里的字段和完整的 lines（沿用原来的行 id，新行不给 id）。",
+      {"backfill": {"type": "string"}, "reason": {"type": "string"}, "changes": {"type": "object"}, "void": {"type": "boolean"},
+       "version": {"type": "integer", "description": "get_historical_backfill 返回的 version，防止覆盖别人刚改的"}},
+      ["backfill", "reason", "version"], tier="propose")
+def propose_backfill_change(ctx, db, backfill, reason, version, changes=None, void=False):
+    from .. import backfill as bf
+    bf.require_admin(ctx.user)
+    rec = _bf_get(db, backfill)
+    if version != rec.version:
+        raise ToolError(f"补录单已被修改过（现在是第 {rec.version} 版），先 get_historical_backfill 再提")
+    ch = {}
+    if changes:
+        x = _bf_payload({k: v for k, v in changes.items() if k != "lines"}, changes.get("lines"))
+        ch = {k: v for k, v in x.items() if k != "lines" or changes.get("lines")}
+    src = f"agent:{ctx.client}"
+    if rec.status == "draft":
+        if void:
+            bf.void(db, ctx.user, rec, reason, version, source=src)
+        else:
+            bf.revise(db, ctx.user, rec, ch, reason, version, source=src)
+        db.commit()
+        return _bf_reply(ctx, db, rec, "草稿已" + ("作废" if void else "修改") + "（草稿不影响库存）。")
+    bf.propose_pending(db, ctx.user, rec, ch, reason, void, source=src)
+    db.commit()
+    return _bf_reply(ctx, db, rec, "已提交待确认的" + ("作废" if void else "修改") + "，尚未生效。请用户打开 confirm_url 看库存差额后确认。")
